@@ -1,0 +1,31 @@
+name: Trílogo → chamados
+on:
+  schedule:
+    - cron: "0 10 * * *"    # 07:00 (America/Sao_Paulo, UTC-3) = 10:00 UTC
+  workflow_dispatch: {}
+jobs:
+  ler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install playwright && python -m playwright install --with-deps chromium
+      - name: Instalações (jonas)
+        env:
+          TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_INSTALACOES }}
+          TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_INSTALACOES }}
+          ABA: INSTALACOES
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DIAS: "45"
+        run: python trilogo_chamados.py
+      - name: Civil (humberto)
+        env:
+          TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_CIVIL }}
+          TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_CIVIL }}
+          ABA: CIVIL
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DIAS: "45"
+        run: python trilogo_chamados.py
