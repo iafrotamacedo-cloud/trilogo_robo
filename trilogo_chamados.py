@@ -43,9 +43,11 @@ def parse_dt(s):
 
 def coletar():
     token = {"v": None}
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     with sync_playwright() as p:
-        br = p.chromium.launch(headless=True)
-        ctx = br.new_context()
+        br = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        ctx = br.new_context(user_agent=UA, locale="pt-BR", viewport={"width": 1366, "height": 900})
         page = ctx.new_page()
 
         def on_req(req):
@@ -55,15 +57,42 @@ def coletar():
                 if a: token["v"] = a
         page.on("request", on_req)
 
-        page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        page.get_by_placeholder(re.compile("e-mail", re.I)).fill(EMAIL)
-        page.get_by_role("button", name=re.compile("continuar", re.I)).click()
-        page.locator("input[type=password]").wait_for(timeout=20000)
-        page.locator("input[type=password]").fill(SENHA)
         try:
-            page.get_by_role("button", name=re.compile("entrar|continuar|acessar", re.I)).click(timeout=4000)
+            page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
         except Exception:
-            page.keyboard.press("Enter")
+            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+
+        try:
+            # 1) campo de e-mail (procura de várias formas)
+            email = page.locator(
+                "input[type=email], input[placeholder*='mail' i], "
+                "input[name*='mail' i], input[type=text]").first
+            email.wait_for(state="visible", timeout=45000)
+            email.fill(EMAIL)
+            # 2) Continuar
+            try:
+                page.get_by_role("button", name=re.compile("continuar", re.I)).click(timeout=8000)
+            except Exception:
+                page.keyboard.press("Enter")
+            # 3) senha
+            pw = page.locator("input[type=password]").first
+            pw.wait_for(state="visible", timeout=30000)
+            pw.fill(SENHA)
+            # 4) entrar
+            try:
+                page.get_by_role("button", name=re.compile("entrar|continuar|acessar", re.I)).click(timeout=6000)
+            except Exception:
+                page.keyboard.press("Enter")
+        except Exception as e:
+            # diagnóstico para o log do Actions
+            try:
+                print("DIAG url:", page.url)
+                print("DIAG title:", page.title())
+                print("DIAG texto:", (page.locator("body").inner_text()[:600]).replace("\n", " | "))
+            except Exception:
+                pass
+            br.close()
+            raise
 
         # espera capturar o token (a app chama a API ao logar)
         for _ in range(60):
