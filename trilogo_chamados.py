@@ -109,6 +109,24 @@ def upsert(rows):
 
 def main():
     tickets = coletar()
+
+    # ---------- DIAGNÓSTICO (aparece no log do Actions) ----------
+    print("DIAG total lidos:", len(tickets))
+    dist = {}
+    for t in tickets:
+        s = t.get("status"); dist[s] = dist.get(s, 0) + 1
+    print("DIAG distribuição de status:", dist)
+    if tickets:
+        print("DIAG campos do 1º ticket:", sorted(tickets[0].keys()))
+        print("DIAG amostra do ticket[0]:", json.dumps(tickets[0], ensure_ascii=False)[:800])
+    alvo = os.environ.get("DEBUG_TICKET", "").strip()
+    if alvo:
+        achou = [t for t in tickets if alvo in json.dumps(t, ensure_ascii=False)]
+        print(f"DIAG '{alvo}' aparece em {len(achou)} ticket(s).")
+        if achou:
+            print("DIAG onde aparece:", json.dumps(achou[0], ensure_ascii=False)[:800])
+    # ------------------------------------------------------------
+
     corte = datetime.now() - timedelta(days=DIAS)
     rows = []
     for t in tickets:
