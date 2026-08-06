@@ -44,8 +44,10 @@ def parse_dt(s):
 def coletar():
     token = {"v": None}
     with sync_playwright() as p:
+        UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
         br = p.chromium.launch(headless=True)
-        ctx = br.new_context()
+        ctx = br.new_context(user_agent=UA)
         page = ctx.new_page()
 
         def on_req(req):
@@ -55,13 +57,32 @@ def coletar():
                 if a: token["v"] = a
         page.on("request", on_req)
 
-        page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        page.get_by_placeholder(re.compile("e-mail", re.I)).fill(EMAIL)
-        page.get_by_role("button", name=re.compile("continuar", re.I)).click()
-        page.locator("input[type=password]").wait_for(timeout=20000)
-        page.locator("input[type=password]").fill(SENHA)
+        page.goto(LOGIN_URL, wait_until="networkidle")
+        # campo de e-mail: tenta vários seletores (a tela pode mudar)
+        EMAIL_SEL = ("input[type=email], input[placeholder*='mail' i], input[name*='mail' i], "
+                     "input[id*='mail' i], input[type=text]")
         try:
-            page.get_by_role("button", name=re.compile("entrar|continuar|acessar", re.I)).click(timeout=4000)
+            page.wait_for_selector(EMAIL_SEL, timeout=30000)
+            page.locator(EMAIL_SEL).first.fill(EMAIL)
+        except Exception:
+            try:
+                campos = page.eval_on_selector_all(
+                    "input", "els => els.map(e => ({t:e.type, ph:e.placeholder, n:e.name, id:e.id}))")
+                print("DIAG login falhou. URL=", page.url)
+                print("DIAG inputs na página:", campos)
+            except Exception:
+                pass
+            br.close(); raise
+        # botão de avançar (nome pode variar)
+        try:
+            page.get_by_role("button", name=re.compile("continuar|prosseguir|avan|próximo|proximo|entrar|login", re.I)).click(timeout=5000)
+        except Exception:
+            page.keyboard.press("Enter")
+        # senha
+        page.wait_for_selector("input[type=password]", timeout=30000)
+        page.locator("input[type=password]").first.fill(SENHA)
+        try:
+            page.get_by_role("button", name=re.compile("entrar|continuar|acessar|login", re.I)).click(timeout=5000)
         except Exception:
             page.keyboard.press("Enter")
 
