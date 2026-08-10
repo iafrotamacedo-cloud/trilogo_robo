@@ -1,8 +1,14 @@
 name: Trílogo → chamados
 on:
   schedule:
-    - cron: "0 10 * * *"    # 07:00 (America/Sao_Paulo, UTC-3) = 10:00 UTC
-  workflow_dispatch: {}
+    - cron: "0 10 * * *"    # 07:00 (America/Sao_Paulo, UTC-3) = 10:00 UTC — roda em modo ROTINA
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "inicial (60 dias, carga) ou rotina (72h por atualização)"
+        default: "rotina"
+        type: choice
+        options: [rotina, inicial]
 jobs:
   ler:
     runs-on: ubuntu-latest
@@ -18,7 +24,7 @@ jobs:
           ABA: INSTALACOES
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          DIAS: "45"
+          MODO: ${{ github.event.inputs.modo || 'rotina' }}
         run: python trilogo_chamados.py
       - name: Civil (humberto)
         env:
@@ -27,5 +33,5 @@ jobs:
           ABA: CIVIL
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          DIAS: "45"
+          MODO: ${{ github.event.inputs.modo || 'rotina' }}
         run: python trilogo_chamados.py
