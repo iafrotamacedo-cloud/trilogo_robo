@@ -189,6 +189,11 @@ def main():
     print(f"MODO={MODO or '(compat DIAS)'} | filtro por {campo}"
           f"{f' {jan_dias}d' if jan_dias else f' {jan_horas}h'}")
 
+    # lojas fora do escopo de atendimento — nunca entram no banco
+    EXCLUIR = ("juazeiro", "lagoa seca", "crato")   # "novo juazeiro" cai em "juazeiro"
+    def _fora_escopo(r):
+        lj = (r.get("loja") or "").lower()
+        return any(x in lj for x in EXCLUIR)
     rows = []
     for t in tickets:
         dtc = parse_dt(t.get("creationDateTime") or t.get("creationDate"))
@@ -198,7 +203,9 @@ def main():
         else:  # mudanca (rotina)
             ref = dtu or dtc
             if not ref or ref < agora - timedelta(hours=jan_horas): continue
-        rows.append(_row(t))
+        r = _row(t)
+        if _fora_escopo(r): continue
+        rows.append(r)
 
     print(f"{len(tickets)} lidos | {len(rows)} dentro da janela")
     upsert(rows)
