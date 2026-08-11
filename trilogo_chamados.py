@@ -6,7 +6,7 @@ Roda 1 conta por execução (o workflow chama 2x: Instalações e Civil).
 
 Dois modos (variável MODO):
   MODO=inicial  -> carga inicial: chamados dos últimos 60 dias (por DATA DE CRIAÇÃO)
-  MODO=rotina   -> rotina: chamados ATUALIZADOS nas últimas 72h (pega troca de status)
+  MODO=rotina   -> rotina: chamados ATUALIZADOS nas últimas 12h (ajustável via ROTINA_HORAS; pega troca de status)
   (sem MODO)    -> compatível: usa DIAS (padrão 45) por data de criação
 
 Variáveis de ambiente (segredos no GitHub):
@@ -183,7 +183,7 @@ def main():
     if MODO == "inicial":
         campo, jan_dias, jan_horas = "criacao", 60, None
     elif MODO == "rotina":
-        campo, jan_dias, jan_horas = "mudanca", None, 72
+        campo, jan_dias, jan_horas = "mudanca", None, int(os.environ.get("ROTINA_HORAS", "12"))
     else:
         campo, jan_dias, jan_horas = "criacao", DIAS, None
     print(f"MODO={MODO or '(compat DIAS)'} | filtro por {campo}"
