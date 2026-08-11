@@ -1,7 +1,7 @@
 name: Trílogo → chamados
+# Agendamento REMOVIDO do GitHub — a execução agora é comandada pelo FrotaHub
+# (disparo manual do builder ou pelo agendador do sistema, via workflow_dispatch).
 on:
-  schedule:
-    - cron: "0 10 * * *"    # 07:00 (America/Sao_Paulo, UTC-3) = 10:00 UTC — roda em modo ROTINA
   workflow_dispatch:
     inputs:
       modo:
