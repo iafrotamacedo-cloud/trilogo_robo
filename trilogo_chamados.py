@@ -33,7 +33,7 @@ STATUS = os.environ.get("STATUS_ACTIONS", "1,2,3,4,5,6,7,8,9,10")
 LIMIT = 50
 
 # rótulos conhecidos; códigos novos (ex.: Fechado/Arquivado) aparecem no DIAG e a gente mapeia aqui depois
-STATUS_LABEL = {1: "Aberto", 6: "Em execução", 7: "Executado", 5: "Vistoriado"}
+STATUS_LABEL = {1: "Aberto", 6: "Em execução", 7: "Executado", 5: "Vistoriado", 3: "Arquivado"}
 PRIOR_LABEL  = {1: "Baixa", 2: "Média", 3: "Alta", 4: "Urgente"}
 
 def aba_from(sc_name):
@@ -190,6 +190,9 @@ def main():
           " <- se aparecer código novo (fechado/arquivado), me avise para rotular")
     if tickets:
         print("DIAG row[0] mapeado:", json.dumps(_row(tickets[0]), ensure_ascii=False)[:600])
+        # --- descoberta: quais campos o chamado cru tem? (procuramos data/histórico de vistoria) ---
+        print("DIAG keys do chamado cru:", sorted(tickets[0].keys()))
+        print("DIAG chamado cru completo:", json.dumps(tickets[0], ensure_ascii=False)[:3500])
     # ------------------------------------------------------------
 
     # RECARGA COMPLETA: últimos JANELA_DIAS (por data de criação), TODOS os status.
