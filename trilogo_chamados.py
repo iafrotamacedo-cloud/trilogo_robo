@@ -17,6 +17,10 @@ import os, sys, re, json, urllib.request, urllib.error
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
+# ============ CONTADOR DE REVISÃO DO ROBÔ ============
+ROBO_REV = 6   # recarga 90d + Arquivado + dedup(numero,aba) + DIAG do chamado cru
+# ====================================================
+
 EMAIL  = os.environ["TRILOGO_EMAIL"]
 SENHA  = os.environ["TRILOGO_SENHA"]
 ABA    = os.environ.get("ABA", "").upper()
@@ -179,6 +183,7 @@ def zera_aba():
         print("Supabase DELETE erro:", e.code, e.read().decode()[:300]); sys.exit(1)
 
 def main():
+    print(f"===== ROBÔ TRÍLOGO — REV {ROBO_REV} | aba={ABA} =====")
     tickets = coletar()
 
     # ---------- DIAGNÓSTICO (aparece no log do Actions) ----------
