@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
 # ============ CONTADOR DE REVISÃO DO ROBÔ ============
-ROBO_REV = 6   # recarga 90d + Arquivado + dedup(numero,aba) + DIAG do chamado cru
+ROBO_REV = 7   # + marco "atendido" (dateOfLastInspection) gravado por chamado
 # ====================================================
 
 EMAIL  = os.environ["TRILOGO_EMAIL"]
@@ -143,6 +143,7 @@ def _row(t):
     dtc = parse_dt(t.get("creationDateTime") or t.get("creationDate"))
     dtp = parse_dt(t.get("deadlineDate") or t.get("deadLine"))
     dtu = parse_dt(t.get("dateOfLastChange"))
+    dti = parse_dt(t.get("dateOfLastInspection"))   # data da vistoria = MARCO de "atendido"
     return {
         "numero": str(t.get("id")),
         "aba": aba_from((t.get("serviceCompany") or {}).get("name")),
@@ -156,6 +157,10 @@ def _row(t):
         "data_criacao": dtc.strftime("%Y-%m-%d") if dtc else None,
         "prazo": dtp.strftime("%Y-%m-%d") if dtp else None,
         "data_atualizacao": dtu.isoformat() if dtu else None,
+        # MARCO "atendido": passou por vistoriado alguma vez (persiste mesmo depois de fechado/arquivado)
+        "atendido": bool(dti),
+        "atendido_em": dti.strftime("%Y-%m-%d") if dti else None,
+        "vistoriado_por": _nome(t.get("inspectedBy")),
     }
 
 def upsert(rows):
@@ -194,10 +199,9 @@ def main():
     print("DIAG distribuição de status (codigo: qtd):", dist,
           " <- se aparecer código novo (fechado/arquivado), me avise para rotular")
     if tickets:
-        print("DIAG row[0] mapeado:", json.dumps(_row(tickets[0]), ensure_ascii=False)[:600])
-        # --- descoberta: quais campos o chamado cru tem? (procuramos data/histórico de vistoria) ---
-        print("DIAG keys do chamado cru:", sorted(tickets[0].keys()))
-        print("DIAG chamado cru completo:", json.dumps(tickets[0], ensure_ascii=False)[:3500])
+        print("DIAG row[0] mapeado:", json.dumps(_row(tickets[0]), ensure_ascii=False)[:700])
+        atend = sum(1 for t in tickets if t.get("dateOfLastInspection"))
+        print(f"DIAG atendidos (com data de vistoria) no lote: {atend}/{len(tickets)}")
     # ------------------------------------------------------------
 
     # RECARGA COMPLETA: últimos JANELA_DIAS (por data de criação), TODOS os status.
