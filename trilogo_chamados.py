@@ -4,14 +4,14 @@ Robô de LEITURA do Trílogo -> tabela `chamados` no Supabase.
 Loga na conta, captura o token, chama a API ListTicketsByUser (paginada) e faz upsert.
 Roda 1 conta por execução (o workflow chama 2x: Instalações e Civil).
 
-Dois modos (variável MODO):
-  MODO=inicial  -> carga inicial: chamados dos últimos 60 dias (por DATA DE CRIAÇÃO)
-  MODO=rotina   -> rotina: chamados ATUALIZADOS nas últimas 12h (ajustável via ROTINA_HORAS; pega troca de status)
-  (sem MODO)    -> compatível: usa DIAS (padrão 45) por data de criação
+RECARGA COMPLETA a cada rodada: lê os chamados dos últimos JANELA_DIAS (padrão 90,
+por DATA DE CRIAÇÃO), com TODOS os status, ZERA só a aba desta conta e recarrega.
+Assim o status fica sempre atual e o banco limitado à janela. (MODO não é mais usado.)
 
 Variáveis de ambiente (segredos no GitHub):
   TRILOGO_EMAIL, TRILOGO_SENHA, ABA (CIVIL|INSTALACOES),
-  SUPABASE_URL, SUPABASE_SERVICE_KEY, MODO (inicial|rotina) | DIAS (opcional)
+  SUPABASE_URL, SUPABASE_SERVICE_KEY
+  Opcionais: JANELA_DIAS (padrão 90), STATUS_ACTIONS (padrão amplo)
 """
 import os, sys, re, json, urllib.request, urllib.error
 from datetime import datetime, timedelta
@@ -28,9 +28,11 @@ DIAS   = int(os.environ.get("DIAS", "45"))
 LOGIN_URL = "https://mercadinhossaoluiz.trilogo.app/"
 TICKETS_URL = "https://mercadinhossaoluiz.trilogo.app/tickets"
 API = "https://web.api.trilogo.app/api/Ticket/ListTicketsByUser"
-STATUS = "1,7,5,6"   # Aberto(1), Executado(7), Vistoriado(5), Em execução(6)
+# amplo p/ capturar TODOS os status (inclui Fechado/Arquivado). Ajustável por env se algum código quebrar.
+STATUS = os.environ.get("STATUS_ACTIONS", "1,2,3,4,5,6,7,8,9,10")
 LIMIT = 50
 
+# rótulos conhecidos; códigos novos (ex.: Fechado/Arquivado) aparecem no DIAG e a gente mapeia aqui depois
 STATUS_LABEL = {1: "Aberto", 6: "Em execução", 7: "Executado", 5: "Vistoriado"}
 PRIOR_LABEL  = {1: "Baixa", 2: "Média", 3: "Alta", 4: "Urgente"}
 
@@ -166,6 +168,16 @@ def upsert(rows):
     except urllib.error.HTTPError as e:
         print("Supabase erro:", e.code, e.read().decode()[:400]); sys.exit(1)
 
+def zera_aba():
+    """Apaga os chamados SÓ desta ABA (recarga completa da janela). As outras contas não são tocadas."""
+    url = f"{SB_URL}/rest/v1/chamados?aba=eq.{ABA}"
+    rq = urllib.request.Request(url, method="DELETE", headers={
+        "apikey": SB_KEY, "authorization": f"Bearer {SB_KEY}", "prefer": "return=minimal"})
+    try:
+        urllib.request.urlopen(rq); print(f"zerado: chamados aba={ABA}")
+    except urllib.error.HTTPError as e:
+        print("Supabase DELETE erro:", e.code, e.read().decode()[:300]); sys.exit(1)
+
 def main():
     tickets = coletar()
 
@@ -174,20 +186,17 @@ def main():
     dist = {}
     for t in tickets:
         s = t.get("status"); dist[s] = dist.get(s, 0) + 1
-    print("DIAG distribuição de status:", dist)
+    print("DIAG distribuição de status (codigo: qtd):", dist,
+          " <- se aparecer código novo (fechado/arquivado), me avise para rotular")
     if tickets:
         print("DIAG row[0] mapeado:", json.dumps(_row(tickets[0]), ensure_ascii=False)[:600])
     # ------------------------------------------------------------
 
+    # RECARGA COMPLETA: últimos JANELA_DIAS (por data de criação), TODOS os status.
+    # Zera só esta aba e recarrega -> status sempre atual e banco limitado à janela.
+    JAN = int(os.environ.get("JANELA_DIAS", "90"))
     agora = datetime.now()
-    if MODO == "inicial":
-        campo, jan_dias, jan_horas = "criacao", 60, None
-    elif MODO == "rotina":
-        campo, jan_dias, jan_horas = "mudanca", None, int(os.environ.get("ROTINA_HORAS", "12"))
-    else:
-        campo, jan_dias, jan_horas = "criacao", DIAS, None
-    print(f"MODO={MODO or '(compat DIAS)'} | filtro por {campo}"
-          f"{f' {jan_dias}d' if jan_dias else f' {jan_horas}h'}")
+    print(f"RECARGA COMPLETA | aba={ABA} | janela {JAN} dias por data de criação")
 
     # lojas fora do escopo de atendimento — nunca entram no banco
     EXCLUIR = ("juazeiro", "lagoa seca", "crato")   # "novo juazeiro" cai em "juazeiro"
@@ -197,18 +206,17 @@ def main():
     rows = []
     for t in tickets:
         dtc = parse_dt(t.get("creationDateTime") or t.get("creationDate"))
-        dtu = parse_dt(t.get("dateOfLastChange"))
-        if campo == "criacao":
-            if not dtc or dtc < agora - timedelta(days=jan_dias): continue
-        else:  # mudanca (rotina)
-            ref = dtu or dtc
-            if not ref or ref < agora - timedelta(hours=jan_horas): continue
+        if not dtc or dtc < agora - timedelta(days=JAN): continue
         r = _row(t)
         if _fora_escopo(r): continue
         rows.append(r)
 
-    print(f"{len(tickets)} lidos | {len(rows)} dentro da janela")
-    upsert(rows)
+    print(f"{len(tickets)} lidos | {len(rows)} dentro dos {JAN} dias")
+    if not rows:
+        print("AVISO: 0 chamados no resultado — NÃO vou zerar o banco (evita apagar tudo por falha de leitura).")
+        return
+    zera_aba()      # limpa só esta aba
+    upsert(rows)    # recarrega do zero
 
 if __name__ == "__main__":
     main()
