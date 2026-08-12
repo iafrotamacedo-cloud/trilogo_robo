@@ -214,7 +214,18 @@ def main():
         if _fora_escopo(r): continue
         rows.append(r)
 
-    print(f"{len(tickets)} lidos | {len(rows)} dentro dos {JAN} dias")
+    # dedup por (numero, aba): o mesmo chamado pode vir repetido (reaberturas/paginação).
+    # mantém o registro mais recente (por data_atualizacao).
+    uniq = {}
+    for r in rows:
+        k = (r.get("numero"), r.get("aba"))
+        p = uniq.get(k)
+        if p is None or (r.get("data_atualizacao") or "") >= (p.get("data_atualizacao") or ""):
+            uniq[k] = r
+    dups = len(rows) - len(uniq)
+    rows = list(uniq.values())
+
+    print(f"{len(tickets)} lidos | {len(rows)} únicos dentro dos {JAN} dias | {dups} duplicados removidos")
     if not rows:
         print("AVISO: 0 chamados no resultado — NÃO vou zerar o banco (evita apagar tudo por falha de leitura).")
         return
