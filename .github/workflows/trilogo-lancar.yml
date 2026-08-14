@@ -1,6 +1,15 @@
 name: Trílogo → lançar orçamentos
 on:
-  workflow_dispatch: {}          # disparado pelo botão do FrotaHub
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "modo (interno)"
+        required: false
+        default: "lancar"
+      alvo:
+        description: "origem/arquivo específico (vazio = todos)"
+        required: false
+        default: ""
 jobs:
   lancar:
     runs-on: ubuntu-latest
@@ -14,6 +23,7 @@ jobs:
           MOTOR_URL: ${{ secrets.MOTOR_URL }}
           ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
           LIMITE: ${{ vars.LIMITE }}
+          ALVO: ${{ github.event.inputs.alvo }}
           TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_INSTALACOES }}
           TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_INSTALACOES }}
           ABA: INSTALACOES
@@ -23,6 +33,7 @@ jobs:
           MOTOR_URL: ${{ secrets.MOTOR_URL }}
           ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
           LIMITE: ${{ vars.LIMITE }}
+          ALVO: ${{ github.event.inputs.alvo }}
           TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_CIVIL }}
           TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_CIVIL }}
           ABA: CIVIL
