@@ -76,15 +76,24 @@ def login(page):
     page.wait_for_timeout(3000)
     print("  login: ok", flush=True)
 
-def _click_texto(page, textos, timeout=8000):
-    """Clica no 1º elemento cujo texto casa. Tenta role=button e texto puro."""
-    for t in textos:
+_JS_CLICK = r"""
+(rx) => {
+  const re = new RegExp(rx, 'i');
+  const cand = [...document.querySelectorAll('button,[role=button],a,span,div')]
+     .find(e => e.offsetParent!==null && e.querySelectorAll('*').length<=3 && re.test((e.textContent||'').trim()));
+  if(!cand) return false;
+  cand.scrollIntoView({block:'center'});
+  cand.click();               // bubbla até o handler (ex.: cabeçalho ant-collapse)
+  return true;
+}
+"""
+def _click_js(page, pattern, tries=24, gap=500):
+    """Espera aparecer um elemento cujo texto casa 'pattern' e clica nele (via JS)."""
+    for _ in range(tries):
         try:
-            page.get_by_role("button", name=re.compile(t, re.I)).first.click(timeout=timeout); return True
+            if page.evaluate(_JS_CLICK, pattern): return True
         except Exception: pass
-        try:
-            page.get_by_text(re.compile(t, re.I)).first.click(timeout=3000); return True
-        except Exception: pass
+        page.wait_for_timeout(gap)
     return False
 
 def lancar_um(page, it):
@@ -99,15 +108,17 @@ def lancar_um(page, it):
     # confirma que o ticket abriu nesta conta (empresa prestadora). Se não abrir, deixa p/ outra conta.
     if "ticket" not in page.url:
         print(f"[skip] ticket {tk} não abriu nesta conta"); return False
-    # Custos do ticket -> Novo custo  (seletores confirmados na tela real)
-    _click_texto(page, [r"custos do ticket"]); page.wait_for_timeout(700)
-    if not _click_texto(page, [r"novo custo", r"\+ *novo custo", r"adicionar custo"]):
-        print(f"[falha] ticket {tk}: não achei 'Novo custo'"); return False
-    page.wait_for_timeout(1200)
+    # "Custos do ticket" é um <span class="title">, NÃO um botão -> clique por JS (bubbla e expande)
+    if not _click_js(page, r"^\s*custos do ticket\s*$"):
+        print(f"[falha] ticket {tk}: não achei a seção 'Custos do ticket'"); return False
+    page.wait_for_timeout(900)
+    if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"):
+        print(f"[falha] ticket {tk}: não apareceu 'Novo custo'"); return False
+    page.wait_for_timeout(1400)
     # abre o formulário manual (pula a IA de leitura de nota)
-    if not _click_texto(page, [r"preencher informações manualmente", r"preencher.*manual"]):
+    if not _click_js(page, r"preencher.*manual", tries=8):
         print(f"[aviso] ticket {tk}: link 'Preencher manualmente' não achado — seguindo assim mesmo")
-    page.wait_for_timeout(800)
+    page.wait_for_timeout(900)
     # anexa o orçamento no 1º dropzone (nota fiscal) ANTES de preencher; a IA tenta ler e falha (ok)
     pdf = _baixa_pdf(origem, nome)
     try:
@@ -138,7 +149,7 @@ def lancar_um(page, it):
         print(f"[falha] ticket {tk}: campo Documento ({e})"); return False
     page.wait_for_timeout(400)
     # Concluir
-    if not _click_texto(page, [r"^\s*concluir\s*$", r"concluir"]):
+    if not _click_js(page, r"^\s*concluir\s*$", tries=6):
         print(f"[falha] ticket {tk}: não achei 'Concluir'"); return False
     # confirma sucesso (toast) OU o custo aparecendo com valor
     try:
@@ -160,6 +171,9 @@ def main():
         a = (a or "").upper()
         return (a == ABA) or (a in ("", "?"))
     fila = [x for x in itens if _cabe(x.get("aba"))]
+    lim = int(os.environ.get("LIMITE") or "0")   # LIMITE=1 -> testa com 1; 0/vazio -> todos
+    if lim > 0:
+        fila = fila[:lim]; print(f"MODO TESTE: LIMITE={lim} -> processando só {len(fila)}")
     print(f"conta {ABA}: {len(fila)} de {len(itens)} orçamento(s) na fila")
     if not fila: print("nada a fazer nesta conta."); return
     feitos = 0
