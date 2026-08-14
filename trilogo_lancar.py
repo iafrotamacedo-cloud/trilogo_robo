@@ -14,13 +14,15 @@ Segredos (GitHub):
 DEDUP: o motor só devolve o que ainda está em 1/4; e só move/marca quando o custo
 entra de fato. Se o sucesso não for confirmado, o arquivo fica onde está.
 """
-import os, re, sys, json, tempfile, functools, urllib.request, urllib.error, urllib.parse
+import sys, time
+try: sys.stdout.reconfigure(line_buffering=True)   # GitHub faz buffer -> força linha a linha
+except Exception: pass
+print("BOOT 1/3: processo Python iniciou", flush=True)
+import os, re, json, tempfile, functools, traceback, urllib.request, urllib.error, urllib.parse
+print("BOOT 2/3: imports básicos ok — importando playwright (pode levar alguns segundos)…", flush=True)
 from playwright.sync_api import sync_playwright
-
-# GitHub Actions faz buffer do stdout -> nada aparece no log até o fim.
-# Forçamos todo print a descarregar na hora, para acompanhar o progresso ao vivo.
+print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-print("== robô de lançamento: iniciando ==")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
 RKEY  = os.environ.get("ROBOT_KEY", "")
@@ -41,7 +43,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 def _get(path):
     req = urllib.request.Request(f"{MOTOR}{path}", headers={"x-robot-key": RKEY})
-    return json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
+    return json.loads(urllib.request.urlopen(req, timeout=45).read().decode())
 
 def _post(path, obj):
     req = urllib.request.Request(f"{MOTOR}{path}", data=json.dumps(obj).encode(), method="POST",
@@ -146,22 +148,23 @@ def lancar_um(page, it):
         print(f"[incerto] ticket {tk}: não vi confirmação de sucesso — NÃO vou mover"); return False
 
 def main():
-    print(f"buscando lista de orçamentos no motor ({MOTOR}) … (se o Render estiver 'dormindo', pode levar até ~1 min)")
+    print(f"PASSO A: buscando lista no motor ({MOTOR}/robot/lancar_worklist) …")
+    t0 = time.time()
     try:
         itens = _get("/robot/lancar_worklist").get("itens", [])
     except Exception as e:
-        print("Falha ao obter worklist:", e); sys.exit(1)
-    print(f"worklist recebida: {len(itens)} orçamento(s) no total (pastas 1 e 4)")
+        print(f"PASSO A FALHOU após {time.time()-t0:.0f}s: {e}"); sys.exit(1)
+    print(f"PASSO A OK em {time.time()-t0:.0f}s: {len(itens)} orçamento(s) no total (pastas 1 e 4)")
     # nesta conta: processa os da aba correspondente + os "?" (tenta; se não abrir, pula)
     def _cabe(a):
         a = (a or "").upper()
         return (a == ABA) or (a in ("", "?"))
     fila = [x for x in itens if _cabe(x.get("aba"))]
     print(f"conta {ABA}: {len(fila)} de {len(itens)} orçamento(s) na fila")
-    if not fila: return
+    if not fila: print("nada a fazer nesta conta."); return
     feitos = 0
     with sync_playwright() as p:
-        print("abrindo navegador…", flush=True)
+        print("PASSO B: abrindo navegador (Chromium)…", flush=True)
         br = p.chromium.launch(headless=True)
         ctx = br.new_context(user_agent=UA)
         ctx.set_default_navigation_timeout(30000)
@@ -182,4 +185,9 @@ def main():
     print(f"conta {ABA}: {feitos} lançado(s) e movido(s).")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        print("ERRO NÃO TRATADO:"); traceback.print_exc(); sys.exit(1)
