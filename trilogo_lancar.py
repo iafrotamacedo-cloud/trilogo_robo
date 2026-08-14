@@ -37,6 +37,7 @@ if not MOTOR.startswith("http"):
 EMAIL = os.environ["TRILOGO_EMAIL"]
 SENHA = os.environ["TRILOGO_SENHA"]
 ABA   = os.environ.get("ABA", "").upper()
+ALVO  = os.environ.get("ALVO", "").strip()   # "origem/arquivo" -> lança só esse; vazio = todos
 LOGIN_URL = "https://mercadinhossaoluiz.trilogo.app/"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -49,6 +50,11 @@ def _post(path, obj):
     req = urllib.request.Request(f"{MOTOR}{path}", data=json.dumps(obj).encode(), method="POST",
         headers={"x-robot-key": RKEY, "content-type": "application/json"})
     return json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
+
+def _prog(arquivo, status, pct):
+    """Reporta o andamento de um orçamento para o motor (barra da tela)."""
+    try: _post("/robot/lancar_progresso", {"arquivo": arquivo, "status": status, "pct": pct})
+    except Exception: pass
 
 def _baixa_pdf(origem, nome):
     url = f"{MOTOR}/robot/lancar_pdf?key={urllib.parse.quote(RKEY)}&origem={origem}&nome={urllib.parse.quote(nome)}"
@@ -100,21 +106,23 @@ def lancar_um(page, it):
     """Cria o custo no ticket. Devolve True só se confirmar o sucesso."""
     tk = it.get("ticket"); origem = it.get("origem"); nome = it.get("arquivo")
     valor = it.get("valor")
-    if not tk:
-        print(f"[skip] {nome}: sem ticket associado"); return False
+    def fail(msg, marca=True):
+        print(f"[falha] ticket {tk}: {msg}", flush=True)
+        if marca: _prog(nome, "falha", 0)
+        return False
+    if not tk: return fail("sem ticket associado")
+    _prog(nome, "abrindo ticket", 15)
     print(f"  ticket {tk}: abrindo…", flush=True)
     page.goto(f"https://mercadinhossaoluiz.trilogo.app/ticket/{tk}", wait_until="domcontentloaded")
     page.wait_for_timeout(2500)
-    # confirma que o ticket abriu nesta conta (empresa prestadora). Se não abrir, deixa p/ outra conta.
     if "ticket" not in page.url:
-        print(f"[skip] ticket {tk} não abriu nesta conta"); return False
-    # "Custos do ticket" é um <span class="title">, NÃO um botão -> clique por JS (bubbla e expande)
-    if not _click_js(page, r"^\s*custos do ticket\s*$"):
-        print(f"[falha] ticket {tk}: não achei a seção 'Custos do ticket'"); return False
+        print(f"[skip] ticket {tk} não abriu nesta conta"); return False   # não marca falha (é da outra conta)
+    # "Custos do ticket" é um <span>, NÃO um botão -> clique por JS (bubbla e expande)
+    if not _click_js(page, r"^\s*custos do ticket\s*$"): return fail("não achei a seção 'Custos do ticket'")
     page.wait_for_timeout(900)
-    if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"):
-        print(f"[falha] ticket {tk}: não apareceu 'Novo custo'"); return False
+    if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"): return fail("não apareceu 'Novo custo'")
     page.wait_for_timeout(1400)
+    _prog(nome, "preenchendo", 45)
     # abre o formulário manual (pula a IA de leitura de nota)
     if not _click_js(page, r"preencher.*manual", tries=8):
         print(f"[aviso] ticket {tk}: link 'Preencher manualmente' não achado — seguindo assim mesmo")
@@ -124,7 +132,7 @@ def lancar_um(page, it):
     try:
         page.wait_for_selector("input[type=file]", timeout=15000)
         page.locator("input[type=file]").first.set_input_files(pdf)
-        page.wait_for_timeout(3500)   # espera a IA tentar (e falhar) sem sobrescrever depois
+        page.wait_for_timeout(3500)
     except Exception as e:
         print(f"[aviso] ticket {tk}: não anexei o PDF ({e}) — sigo preenchendo")
     # Tipo de custo = Materiais  (ant-select #costType)
@@ -133,30 +141,29 @@ def lancar_um(page, it):
         try: page.get_by_role("option", name=re.compile(r"^\s*materiais\s*$", re.I)).first.click(timeout=4000)
         except Exception: page.locator(".ant-select-item-option", has_text=re.compile(r"^\s*materiais\s*$", re.I)).first.click(timeout=4000)
     except Exception as e:
-        print(f"[falha] ticket {tk}: não setei 'Materiais' ({e})"); return False
-    # Valor = #serviceCost  (input com máscara de moeda -> digita os centavos)
+        return fail(f"não setei 'Materiais' ({e})")
+    # Valor = #serviceCost  (máscara de moeda -> digita os centavos)
     try:
         cents = str(int(round(float(valor) * 100)))
         v = page.locator("#serviceCost"); v.click(); page.keyboard.press("Control+A"); page.keyboard.press("Delete")
         v.type(cents, delay=40)
     except Exception as e:
-        print(f"[falha] ticket {tk}: campo Valor ({e})"); return False
+        return fail(f"campo Valor ({e})")
     # Número do documento = ticket  (#documentNumber)
     try:
         d = page.locator("#documentNumber"); d.click(); page.keyboard.press("Control+A"); page.keyboard.press("Delete")
         d.type(str(tk), delay=20)
     except Exception as e:
-        print(f"[falha] ticket {tk}: campo Documento ({e})"); return False
+        return fail(f"campo Documento ({e})")
+    _prog(nome, "concluindo", 90)
     page.wait_for_timeout(400)
-    # Concluir
-    if not _click_js(page, r"^\s*concluir\s*$", tries=6):
-        print(f"[falha] ticket {tk}: não achei 'Concluir'"); return False
-    # confirma sucesso (toast) OU o custo aparecendo com valor
+    if not _click_js(page, r"^\s*concluir\s*$", tries=6): return fail("não achei 'Concluir'")
+    # confirma sucesso (toast)
     try:
         page.get_by_text(re.compile(r"custo inserido com sucesso|sucesso", re.I)).first.wait_for(timeout=12000)
         print(f"[ok] ticket {tk}: custo lançado (R$ {_fmt_valor(valor)})"); return True
     except Exception:
-        print(f"[incerto] ticket {tk}: não vi confirmação de sucesso — NÃO vou mover"); return False
+        return fail("não vi confirmação de sucesso — NÃO vou mover")
 
 def main():
     print(f"PASSO A: buscando lista no motor ({MOTOR}/robot/lancar_worklist) …")
@@ -171,9 +178,13 @@ def main():
         a = (a or "").upper()
         return (a == ABA) or (a in ("", "?"))
     fila = [x for x in itens if _cabe(x.get("aba"))]
+    if ALVO:   # lançar só um orçamento específico (botão 'Lançar' da linha)
+        fila = [x for x in fila if f"{x['origem']}/{x['arquivo']}" == ALVO or x["arquivo"] == ALVO]
+        print(f"ALVO único: {ALVO} -> {len(fila)} item(ns)")
     lim = int(os.environ.get("LIMITE") or "0")   # LIMITE=1 -> testa com 1; 0/vazio -> todos
     if lim > 0:
         fila = fila[:lim]; print(f"MODO TESTE: LIMITE={lim} -> processando só {len(fila)}")
+    for x in fila: _prog(x["arquivo"], "aguardando", 0)   # popula a tela com a fila
     print(f"conta {ABA}: {len(fila)} de {len(itens)} orçamento(s) na fila")
     if not fila: print("nada a fazer nesta conta."); return
     feitos = 0
