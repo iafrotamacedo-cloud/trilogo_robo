@@ -1,18 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-Robô de LANÇAMENTO de orçamentos no Trílogo (custo do ticket).
-Pega a lista no motor do FrotaHub, loga na conta e, para cada orçamento das pastas
-1 (normais) e 4 (rateio), cria o custo no ticket (Tipo=Materiais, Valor=TOTAL GERAL,
-Nº do documento=ticket) e avisa o motor, que move o arquivo (1->2 / 4->5) e marca
-como lançado. Roda 1 conta por execução (o workflow chama 2x: Instalações e Civil).
+Robô de LANÇAMENTO / CONFERÊNCIA de orçamentos no Trílogo (custo do ticket).
+
+Pega a lista no motor do FrotaHub, loga na conta e trabalha os orçamentos das pastas
+1 (normais) e 4 (rateio). Roda 1 conta por execução (o workflow chama 2x: Instalações e Civil).
+
+>>> NOVIDADE (rev API): a existência de custo é lida pela API do Trílogo
+    GET https://web.api.trilogo.app/api/Ticket/GetTicketCosts?ticketId={numero}
+    (token vem do localStorage['session'].accessToken após o login).
+    Resposta: []  -> nenhum custo (ainda não lançado)
+              [ {..} ] -> já tem custo (Trílogo NÃO deixa inserir um 2º) => JÁ LANÇADO.
+    Cada custo traz: type, totalValue, documentNumber, invoiceFiles[].fileName.
+
+MODO=conferir : só LÊ os custos pela API (segundos, sem abrir ticket) e reconcilia as
+                duplicatas (move 1->2 / 4->5 + marca lançado). NÃO lança, NÃO apaga.
+MODO=lancar   : para cada orçamento, PRÉ-CHECA por API; se já tem custo, só reconcilia
+                (sem abrir a tela); se não tem, abre "Custos do ticket > Novo custo",
+                sobe o PDF, Tipo=Materiais, Valor=TOTAL GERAL, Nº do documento=ticket, conclui.
 
 Segredos (GitHub):
-  MOTOR_URL           ex.: https://frotahub-motor.onrender.com
-  ROBOT_KEY           mesmo valor da variável ROBOT_KEY no Render
+  MOTOR_URL   ex.: https://motor-orcamentos.onrender.com
+  ROBOT_KEY   mesmo valor da variável ROBOT_KEY no Render
   TRILOGO_EMAIL, TRILOGO_SENHA, ABA (CIVIL|INSTALACOES)
 
-DEDUP: o motor só devolve o que ainda está em 1/4; e só move/marca quando o custo
-entra de fato. Se o sucesso não for confirmado, o arquivo fica onde está.
+DEDUP: o motor só devolve o que ainda está em 1/4; e só move/marca quando confirma.
+       Nada é apagado (Dropbox move para a pasta "lançados").
 """
 import sys, time
 try: sys.stdout.reconfigure(line_buffering=True)   # GitHub faz buffer -> força linha a linha
@@ -39,7 +51,9 @@ SENHA = os.environ["TRILOGO_SENHA"]
 ABA   = os.environ.get("ABA", "").upper()
 ALVO  = os.environ.get("ALVO", "").strip()   # "origem/arquivo" -> lança só esse; vazio = todos
 MODO  = (os.environ.get("MODO", "") or "lancar").strip()   # "conferir" = só lê custos, não lança
-LOGIN_URL = "https://mercadinhossaoluiz.trilogo.app/"
+BASE_URL  = "https://mercadinhossaoluiz.trilogo.app"
+LOGIN_URL = BASE_URL + "/"
+API_URL   = "https://web.api.trilogo.app"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
@@ -67,6 +81,9 @@ def _fmt_valor(v):
     try: return f"{float(v):.2f}".replace(".", ",")
     except Exception: return str(v)
 
+def _tipo_nome(t):
+    return {1: "Mão de obra", 2: "Materiais", 3: "Mão de obra e Materiais"}.get(t, f"tipo {t}")
+
 def login(page):
     print("  login: abrindo tela…", flush=True)
     page.goto(LOGIN_URL, wait_until="domcontentloaded")   # networkidle trava em SPA
@@ -81,8 +98,59 @@ def login(page):
     try: page.get_by_role("button", name=re.compile("entrar|continuar|acessar|login", re.I)).click(timeout=5000)
     except Exception: page.keyboard.press("Enter")
     page.wait_for_timeout(3000)
-    print("  login: ok", flush=True)
+    # confirma que temos token (necessário para as chamadas de API)
+    tk = _token(page)
+    print("  login: ok" + ("" if tk else " (ATENÇÃO: token não encontrado no localStorage!)"), flush=True)
 
+def _token(page):
+    try:
+        return page.evaluate("() => { const s = JSON.parse(localStorage.getItem('session')||'{}'); return s.accessToken || null; }")
+    except Exception:
+        return None
+
+# ---- Leitura de custos pela API do Trílogo (rápida) ------------------------------
+_JS_COSTS = r"""
+async (tk) => {
+  const s = JSON.parse(localStorage.getItem('session') || '{}');
+  const tkn = s.accessToken;
+  if (!tkn) return { status: 0, err: 'sem token' };
+  try {
+    const r = await fetch('https://web.api.trilogo.app/api/Ticket/GetTicketCosts?ticketId=' + encodeURIComponent(tk),
+                          { headers: { 'Authorization': 'Bearer ' + tkn } });
+    let j = null; try { j = await r.json(); } catch (e) {}
+    return { status: r.status, arr: Array.isArray(j) ? j : null };
+  } catch (e) {
+    return { status: -1, err: String(e) };
+  }
+}
+"""
+
+def _custos_api(page, tk):
+    """Lê os custos do ticket pela API. Retorna (ok_conta, custos).
+       ok_conta=True  -> 200: 'custos' é a lista normalizada (pode ser []).
+       ok_conta=False -> 401/403/404: ticket não é desta conta / sem acesso.
+       ok_conta=None  -> erro/indefinido (deixa o chamador decidir)."""
+    try:
+        r = page.evaluate(_JS_COSTS, str(tk))
+    except Exception as e:
+        print(f"    (api) erro evaluate ticket {tk}: {str(e)[:80]}"); return (None, [])
+    st = r.get("status"); arr = r.get("arr")
+    if st == 200 and isinstance(arr, list):
+        custos = []
+        for c in arr:
+            files = c.get("invoiceFiles") or []
+            custos.append({
+                "tipo":  _tipo_nome(c.get("type")),
+                "valor": c.get("totalValue"),
+                "doc":   c.get("documentNumber"),
+                "pdf":   (files[0].get("fileName") if files else None),
+            })
+        return (True, custos)
+    if st in (401, 403, 404):
+        return (False, [])
+    print(f"    (api) ticket {tk}: status inesperado {st}"); return (None, [])
+
+# ---- Helpers de UI (ainda usados no fluxo de LANÇAMENTO real) --------------------
 _JS_CLICK = r"""
 (rx) => {
   const re = new RegExp(rx, 'i');
@@ -103,7 +171,7 @@ def _click_js(page, pattern, tries=24, gap=500):
         page.wait_for_timeout(gap)
     return False
 
-_JS_CUSTOS = r"""
+_JS_CUSTOS_DOM = r"""
 () => {
   const brl = s => { const m=(s||'').match(/R\$\s*([\d.]+),(\d{2})/); return m? parseFloat(m[1].replace(/\./g,'')+'.'+m[2]) : null; };
   const cards = [...document.querySelectorAll('div')].filter(d=>{
@@ -113,25 +181,36 @@ _JS_CUSTOS = r"""
   return uniq.map(c=>({tipo:(c.innerText.match(/m[aã]o de obra|materiais/i)||[''])[0], valor: brl(c.innerText)})).filter(x=>x.valor!=null);
 }
 """
+
+# ---- CONFERÊNCIA (rápida, por API) -----------------------------------------------
 def conferir_um(page, it):
-    """Abre o ticket, lê os custos já lançados e reporta se há duplicata (por valor)."""
+    """Lê os custos do ticket pela API. Se houver custo => duplicata => reconcilia
+       (move 1->2/4->5 + marca lançado). Nunca lança, nunca apaga."""
     tk=it.get("ticket"); origem=it.get("origem"); nome=it.get("arquivo"); valor=it.get("valor")
     if not tk:
         _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
               "custos":[],"duplicata":False,"aberto":False}); return
-    page.goto(f"https://mercadinhossaoluiz.trilogo.app/ticket/{tk}", wait_until="domcontentloaded")
-    page.wait_for_timeout(2500)
-    if "ticket" not in page.url: return   # da outra conta
-    _click_js(page, r"^\s*custos do ticket\s*$"); page.wait_for_timeout(1200)
-    try: custos = page.evaluate(_JS_CUSTOS) or []
-    except Exception: custos = []
-    dup = (valor is not None) and any(abs((c.get("valor") or -1) - float(valor)) <= 0.02 for c in custos)
-    print(f"  ticket {tk}: {len(custos)} custo(s) · duplicata={dup}", flush=True)
+    ok_conta, custos = _custos_api(page, tk)
+    if ok_conta is False:   # ticket de outra conta — não conta como conferido aqui
+        print(f"  ticket {tk}: fora desta conta (pula)")
+        _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
+              "custos":[],"duplicata":False,"aberto":False,"outra_conta":True}); return
+    dup = len(custos) >= 1   # qualquer custo = já lançado (Trílogo não deixa 2º)
+    reconciliado = False
+    if dup:   # limpa AGORA (move+marca) — resultado gravado mesmo se o processo cair depois
+        try:
+            r = _post("/robot/lancar_ok", {"origem": origem, "nome": nome})
+            reconciliado = bool(r.get("ok"))
+        except Exception as e:
+            print(f"  ticket {tk}: falha ao reconciliar ({str(e)[:80]})", flush=True)
+    print(f"  ticket {tk}: {len(custos)} custo(s) · duplicata={dup} · reconciliado={reconciliado}", flush=True)
     _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-          "custos":custos,"duplicata":dup,"aberto":True})
+          "custos":custos,"duplicata":dup,"reconciliado":reconciliado,"aberto":True})
+    time.sleep(0.06)   # gentileza com a API
 
+# ---- LANÇAMENTO real (com pré-checagem por API) ----------------------------------
 def lancar_um(page, it):
-    """Cria o custo no ticket. Devolve True só se confirmar o sucesso."""
+    """Cria o custo no ticket. Devolve True só se confirmar o sucesso (ou se já estava lançado)."""
     tk = it.get("ticket"); origem = it.get("origem"); nome = it.get("arquivo")
     valor = it.get("valor")
     def fail(msg, marca=True):
@@ -139,22 +218,32 @@ def lancar_um(page, it):
         if marca: _prog(nome, "falha", 0)
         return False
     if not tk: return fail("sem ticket associado")
+
+    # PRÉ-CHECAGEM POR API: se já tem custo, NÃO abre a tela — só reconcilia (move+marca).
+    ok_conta, custos_api = _custos_api(page, tk)
+    if ok_conta and custos_api:
+        print(f"[dup-api] ticket {tk}: já tem custo ({', '.join(str(c.get('tipo')) for c in custos_api)}) "
+              f"— reconcilia sem abrir a tela", flush=True)
+        _prog(nome, "já lançado", 100)
+        return True   # main chama /robot/lancar_ok e move (dedup)
+    # (ok_conta False/None cai no fluxo normal: a própria tela confirma se é desta conta)
+
     _prog(nome, "abrindo ticket", 15)
     print(f"  ticket {tk}: abrindo…", flush=True)
-    page.goto(f"https://mercadinhossaoluiz.trilogo.app/ticket/{tk}", wait_until="domcontentloaded")
+    page.goto(f"{BASE_URL}/ticket/{tk}", wait_until="domcontentloaded")
     page.wait_for_timeout(2500)
     if "ticket" not in page.url:
-        print(f"[skip] ticket {tk} não abriu nesta conta"); return False   # não marca falha (é da outra conta)
+        print(f"[skip] ticket {tk} não abriu nesta conta"); return False   # não marca falha (outra conta)
     # "Custos do ticket" é um <span>, NÃO um botão -> clique por JS (bubbla e expande)
     if not _click_js(page, r"^\s*custos do ticket\s*$"): return fail("não achei a seção 'Custos do ticket'")
     page.wait_for_timeout(1000)
-    # TRAVA ANTI-DUPLICAÇÃO: se o ticket já tem um custo com este valor, NÃO lança de novo
-    try: custos = page.evaluate(_JS_CUSTOS) or []
+    # TRAVA ANTI-DUPLICAÇÃO (2ª camada, DOM): confirma que ninguém adicionou custo no meio-tempo.
+    try: custos = page.evaluate(_JS_CUSTOS_DOM) or []
     except Exception: custos = []
-    if valor is not None and any(abs((c.get("valor") or -1) - float(valor)) <= 0.02 for c in custos):
-        print(f"[dup] ticket {tk}: já existe custo de R$ {_fmt_valor(valor)} — não lanço de novo (reconcilia)", flush=True)
+    if custos:
+        print(f"[dup] ticket {tk}: já tem custo ({', '.join(c.get('tipo','?') for c in custos)}) — não lanço (reconcilia)", flush=True)
         _prog(nome, "já lançado", 100)
-        return True   # main move+marca (dedup) sem criar custo duplicado
+        return True
     if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"): return fail("não apareceu 'Novo custo'")
     page.wait_for_timeout(1400)
     _prog(nome, "preenchendo", 45)
@@ -162,7 +251,7 @@ def lancar_um(page, it):
     if not _click_js(page, r"preencher.*manual", tries=8):
         print(f"[aviso] ticket {tk}: link 'Preencher manualmente' não achado — seguindo assim mesmo")
     page.wait_for_timeout(900)
-    # anexa o orçamento no 1º dropzone (nota fiscal) ANTES de preencher; a IA tenta ler e falha (ok)
+    # anexa o orçamento no 1º dropzone (nota fiscal) ANTES de preencher
     pdf = _baixa_pdf(origem, nome)
     try:
         page.wait_for_selector("input[type=file]", timeout=15000)
@@ -208,7 +297,7 @@ def main():
     except Exception as e:
         print(f"PASSO A FALHOU após {time.time()-t0:.0f}s: {e}"); sys.exit(1)
     print(f"PASSO A OK em {time.time()-t0:.0f}s: {len(itens)} orçamento(s) no total (pastas 1 e 4)")
-    # nesta conta: processa os da aba correspondente + os "?" (tenta; se não abrir, pula)
+    # nesta conta: processa os da aba correspondente + os "?" (tenta; se não for desta conta, pula)
     def _cabe(a):
         a = (a or "").upper()
         return (a == ABA) or (a in ("", "?"))
@@ -245,7 +334,7 @@ def main():
             except Exception as e:
                 print(f"[erro] {it.get('arquivo')}: {str(e)[:160]}")
         br.close()
-    print(f"conta {ABA} [MODO={MODO}]: {feitos} processado(s).")
+    print(f"conta {ABA} [MODO={MODO}]: {feitos} processado(s). tempo total {time.time()-t0:.0f}s")
 
 if __name__ == "__main__":
     try:
