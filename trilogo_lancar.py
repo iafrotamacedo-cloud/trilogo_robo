@@ -17,8 +17,16 @@ entra de fato. Se o sucesso não for confirmado, o arquivo fica onde está.
 import os, re, sys, json, tempfile, urllib.request, urllib.error, urllib.parse
 from playwright.sync_api import sync_playwright
 
-MOTOR = os.environ["MOTOR_URL"].rstrip("/")
-RKEY  = os.environ["ROBOT_KEY"]
+MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
+RKEY  = os.environ.get("ROBOT_KEY", "")
+if not MOTOR or not RKEY:
+    print("ERRO DE CONFIGURAÇÃO: defina os secrets do GitHub 'MOTOR_URL' (ex.: "
+          "https://SEU-MOTOR.onrender.com) e 'ROBOT_KEY' (mesmo valor da variável "
+          "ROBOT_KEY no Render). MOTOR_URL=%r ROBOT_KEY=%s" % (MOTOR, "vazio" if not RKEY else "ok"))
+    sys.exit(1)
+if not MOTOR.startswith("http"):
+    print("ERRO: MOTOR_URL precisa começar com http(s):// — valor atual: %r" % MOTOR)
+    sys.exit(1)
 EMAIL = os.environ["TRILOGO_EMAIL"]
 SENHA = os.environ["TRILOGO_SENHA"]
 ABA   = os.environ.get("ABA", "").upper()
@@ -46,18 +54,20 @@ def _fmt_valor(v):
     except Exception: return str(v)
 
 def login(page):
-    page.goto(LOGIN_URL, wait_until="networkidle")
+    print("  login: abrindo tela…", flush=True)
+    page.goto(LOGIN_URL, wait_until="domcontentloaded")   # networkidle trava em SPA
     EMAIL_SEL = ("input[type=email], input[placeholder*='mail' i], input[name*='mail' i], "
                  "input[id*='mail' i], input[type=text]")
-    page.wait_for_selector(EMAIL_SEL, timeout=30000)
+    page.wait_for_selector(EMAIL_SEL, timeout=25000)
     page.locator(EMAIL_SEL).first.fill(EMAIL)
     try: page.get_by_role("button", name=re.compile("continuar|prosseguir|avan|próximo|proximo|entrar|login", re.I)).click(timeout=5000)
     except Exception: page.keyboard.press("Enter")
-    page.wait_for_selector("input[type=password]", timeout=30000)
+    page.wait_for_selector("input[type=password]", timeout=25000)
     page.locator("input[type=password]").first.fill(SENHA)
     try: page.get_by_role("button", name=re.compile("entrar|continuar|acessar|login", re.I)).click(timeout=5000)
     except Exception: page.keyboard.press("Enter")
-    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(3000)
+    print("  login: ok", flush=True)
 
 def _click_texto(page, textos, timeout=8000):
     """Clica no 1º elemento cujo texto casa. Tenta role=button e texto puro."""
@@ -76,8 +86,9 @@ def lancar_um(page, it):
     valor = it.get("valor")
     if not tk:
         print(f"[skip] {nome}: sem ticket associado"); return False
-    page.goto(f"https://mercadinhossaoluiz.trilogo.app/ticket/{tk}", wait_until="networkidle")
-    page.wait_for_timeout(1500)
+    print(f"  ticket {tk}: abrindo…", flush=True)
+    page.goto(f"https://mercadinhossaoluiz.trilogo.app/ticket/{tk}", wait_until="domcontentloaded")
+    page.wait_for_timeout(2500)
     # confirma que o ticket abriu nesta conta (empresa prestadora). Se não abrir, deixa p/ outra conta.
     if "ticket" not in page.url:
         print(f"[skip] ticket {tk} não abriu nesta conta"); return False
@@ -140,13 +151,17 @@ def main():
     if not fila: return
     feitos = 0
     with sync_playwright() as p:
+        print("abrindo navegador…", flush=True)
         br = p.chromium.launch(headless=True)
-        ctx = br.new_context(user_agent=UA); page = ctx.new_page()
+        ctx = br.new_context(user_agent=UA)
+        ctx.set_default_navigation_timeout(30000)
+        page = ctx.new_page(); page.set_default_timeout(12000)   # falha rápido em vez de travar
         try:
             login(page)
         except Exception as e:
             print("Falha no login:", e); br.close(); sys.exit(1)
-        for it in fila:
+        for idx, it in enumerate(fila, 1):
+            print(f"[{idx}/{len(fila)}] ticket {it.get('ticket')} · {it.get('arquivo')}", flush=True)
             try:
                 if lancar_um(page, it):
                     r = _post("/robot/lancar_ok", {"origem": it["origem"], "nome": it["arquivo"]})
