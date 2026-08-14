@@ -1,0 +1,21 @@
+name: FrotaHub → backup (agenda + limite)
+# Roda de hora em hora: chama /backup/agenda_tick, que
+#  (1) roda o backup AGENDADO quando bate o dia/hora escolhido pelo builder, e
+#  (2) roda a ROTINA automaticamente se o Supabase passar do teto (%).
+# O motor decide tudo — este cron só "cutuca" o motor.
+on:
+  schedule:
+    - cron: "7 * * * *"        # todo minuto 7 de cada hora (UTC)
+  workflow_dispatch: {}         # permite rodar manualmente também
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cutucar o motor (agenda + limite)
+        run: |
+          curl -fsS -X POST "$MOTOR_URL/backup/agenda_tick" \
+               -H "x-robot-key: $ROBOT_KEY" \
+               -H "content-type: application/json" -d '{}' || echo "tick falhou (segue)"
+        env:
+          MOTOR_URL: ${{ secrets.MOTOR_URL }}
+          ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
