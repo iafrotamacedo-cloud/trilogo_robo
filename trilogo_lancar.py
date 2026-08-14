@@ -92,50 +92,53 @@ def lancar_um(page, it):
     # confirma que o ticket abriu nesta conta (empresa prestadora). Se não abrir, deixa p/ outra conta.
     if "ticket" not in page.url:
         print(f"[skip] ticket {tk} não abriu nesta conta"); return False
-    # 2-3) Custos do ticket -> Novo custo
-    _click_texto(page, [r"custos do ticket"])
-    page.wait_for_timeout(500)
+    # Custos do ticket -> Novo custo  (seletores confirmados na tela real)
+    _click_texto(page, [r"custos do ticket"]); page.wait_for_timeout(700)
     if not _click_texto(page, [r"novo custo", r"\+ *novo custo", r"adicionar custo"]):
         print(f"[falha] ticket {tk}: não achei 'Novo custo'"); return False
     page.wait_for_timeout(1200)
-    # 5-7) subir o PDF no input de arquivo do modal
+    # abre o formulário manual (pula a IA de leitura de nota)
+    if not _click_texto(page, [r"preencher informações manualmente", r"preencher.*manual"]):
+        print(f"[aviso] ticket {tk}: link 'Preencher manualmente' não achado — seguindo assim mesmo")
+    page.wait_for_timeout(800)
+    # anexa o orçamento no 1º dropzone (nota fiscal) ANTES de preencher; a IA tenta ler e falha (ok)
     pdf = _baixa_pdf(origem, nome)
     try:
         page.wait_for_selector("input[type=file]", timeout=15000)
         page.locator("input[type=file]").first.set_input_files(pdf)
+        page.wait_for_timeout(3500)   # espera a IA tentar (e falhar) sem sobrescrever depois
     except Exception as e:
-        print(f"[falha] ticket {tk}: input de arquivo não encontrado ({e})"); return False
-    page.wait_for_timeout(2500)   # a IA do Trílogo tenta ler; ignoramos e preenchemos
-    # 8-9) Tipo de custo = Materiais (Ant Select)
+        print(f"[aviso] ticket {tk}: não anexei o PDF ({e}) — sigo preenchendo")
+    # Tipo de custo = Materiais  (ant-select #costType)
     try:
-        page.get_by_text(re.compile(r"tipo de custo", re.I)).first.click(timeout=4000)
-        page.wait_for_timeout(300)
-        page.get_by_text(re.compile(r"^\s*materiais\s*$", re.I)).first.click(timeout=4000)
-    except Exception:
-        print(f"[aviso] ticket {tk}: não consegui setar 'Materiais' pela tela")
-    # 10) Valor
+        page.locator("#costType").click(timeout=5000); page.wait_for_timeout(400)
+        try: page.get_by_role("option", name=re.compile(r"^\s*materiais\s*$", re.I)).first.click(timeout=4000)
+        except Exception: page.locator(".ant-select-item-option", has_text=re.compile(r"^\s*materiais\s*$", re.I)).first.click(timeout=4000)
+    except Exception as e:
+        print(f"[falha] ticket {tk}: não setei 'Materiais' ({e})"); return False
+    # Valor = #serviceCost  (input com máscara de moeda -> digita os centavos)
     try:
-        campo_v = page.get_by_label(re.compile(r"valor", re.I)).first
-        campo_v.click(); page.keyboard.press("Control+A"); campo_v.type(_fmt_valor(valor))
-    except Exception:
-        try:
-            page.get_by_placeholder(re.compile(r"valor", re.I)).first.fill(_fmt_valor(valor))
-        except Exception: print(f"[aviso] ticket {tk}: campo Valor não preenchido")
-    # 11) Número do documento = ticket
+        cents = str(int(round(float(valor) * 100)))
+        v = page.locator("#serviceCost"); v.click(); page.keyboard.press("Control+A"); page.keyboard.press("Delete")
+        v.type(cents, delay=40)
+    except Exception as e:
+        print(f"[falha] ticket {tk}: campo Valor ({e})"); return False
+    # Número do documento = ticket  (#documentNumber)
     try:
-        page.get_by_label(re.compile(r"n[úu]mero do documento|nº do documento|documento", re.I)).first.fill(str(tk))
-    except Exception:
-        try: page.get_by_placeholder(re.compile(r"documento", re.I)).first.fill(str(tk))
-        except Exception: print(f"[aviso] ticket {tk}: campo Documento não preenchido")
-    # 12) Concluir
-    if not _click_texto(page, [r"concluir", r"salvar", r"confirmar"]):
+        d = page.locator("#documentNumber"); d.click(); page.keyboard.press("Control+A"); page.keyboard.press("Delete")
+        d.type(str(tk), delay=20)
+    except Exception as e:
+        print(f"[falha] ticket {tk}: campo Documento ({e})"); return False
+    page.wait_for_timeout(400)
+    # Concluir
+    if not _click_texto(page, [r"^\s*concluir\s*$", r"concluir"]):
         print(f"[falha] ticket {tk}: não achei 'Concluir'"); return False
-    # confirma sucesso
+    # confirma sucesso (toast) OU o custo aparecendo com valor
     try:
-        page.get_by_text(re.compile(r"custo inserido com sucesso|sucesso", re.I)).first.wait_for(timeout=8000)
-        print(f"[ok] ticket {tk}: custo lançado ({_fmt_valor(valor)})"); return True
+        page.get_by_text(re.compile(r"custo inserido com sucesso|sucesso", re.I)).first.wait_for(timeout=12000)
+        print(f"[ok] ticket {tk}: custo lançado (R$ {_fmt_valor(valor)})"); return True
     except Exception:
-        print(f"[incerto] ticket {tk}: não vi o toast de sucesso — NÃO vou mover"); return False
+        print(f"[incerto] ticket {tk}: não vi confirmação de sucesso — NÃO vou mover"); return False
 
 def main():
     try:
