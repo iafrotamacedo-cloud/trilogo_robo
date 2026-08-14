@@ -1,0 +1,30 @@
+name: FrotaHub → explorar Dropbox (só lista pastas)
+# Lista as pastas de um caminho no Dropbox (NÃO cataloga, NÃO escreve nada).
+# Serve para a gente ver a árvore e apontar a base certa.
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: "Caminho a listar (vazio ou / = raiz da conta). Ex.: /FROTAHUB"
+        required: false
+        default: ""
+jobs:
+  explorar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Listar
+        env:
+          MOTOR_URL: ${{ secrets.MOTOR_URL }}
+          ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
+          CAMINHO: ${{ github.event.inputs.path }}
+        run: |
+          set -uo pipefail
+          body=$(jq -nc --arg p "$CAMINHO" '{path:$p}')
+          resp=$(curl -sS -X POST "$MOTOR_URL/backup/arvore" \
+                   -H "x-robot-key: $ROBOT_KEY" \
+                   -H "content-type: application/json" -d "$body")
+          echo "$resp" | jq '.'
+          echo ""
+          echo "=== PASTAS em $(echo "$resp" | jq -r '.path') ==="
+          echo "$resp" | jq -r '.pastas[]?' | sed 's/^/  • /'
+          echo "  ($(echo "$resp" | jq -r '.arquivos_diretos') arquivo(s) solto(s) direto aqui)"
