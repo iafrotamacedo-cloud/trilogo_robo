@@ -1,0 +1,27 @@
+name: Trílogo → lançar orçamentos
+on:
+  workflow_dispatch: {}          # disparado pelo botão do FrotaHub
+jobs:
+  lancar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install playwright && python -m playwright install --with-deps chromium
+      - name: Instalações (jonas)
+        env:
+          MOTOR_URL: ${{ secrets.MOTOR_URL }}
+          ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
+          TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_INSTALACOES }}
+          TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_INSTALACOES }}
+          ABA: INSTALACOES
+        run: python trilogo_lancar.py
+      - name: Civil (humberto)
+        env:
+          MOTOR_URL: ${{ secrets.MOTOR_URL }}
+          ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
+          TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_CIVIL }}
+          TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_CIVIL }}
+          ABA: CIVIL
+        run: python trilogo_lancar.py
