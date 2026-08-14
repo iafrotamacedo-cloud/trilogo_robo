@@ -1,0 +1,43 @@
+name: FrotaHub → catalogar Dropbox (backfill frio)
+# Roda SOB DEMANDA (botão "Run workflow"). Percorre o Dropbox inteiro e registra
+# cada arquivo no arq_registro como FRIO (storage='dropbox'). NÃO copia nada,
+# NÃO ocupa o Supabase. Pode rodar quantas vezes quiser (idempotente).
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Pasta base no Dropbox (vazio = usa DROPBOX_BASE do motor)"
+        required: false
+        default: ""
+jobs:
+  catalogar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Catalogar (paginando até o fim)
+        env:
+          MOTOR_URL: ${{ secrets.MOTOR_URL }}
+          ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
+          BASE: ${{ github.event.inputs.base }}
+        run: |
+          set -e
+          cursor=""
+          total=0
+          pagina=0
+          while : ; do
+            if [ -z "$cursor" ]; then
+              if [ -z "$BASE" ]; then body='{}'; else body="{\"base\":\"$BASE\"}"; fi
+            else
+              body="{\"cursor\":\"$cursor\"}"
+            fi
+            resp=$(curl -fsS -X POST "$MOTOR_URL/backup/backfill" \
+                     -H "x-robot-key: $ROBOT_KEY" \
+                     -H "content-type: application/json" -d "$body")
+            cat=$(echo "$resp" | jq -r '.catalogados // 0')
+            fim=$(echo "$resp" | jq -r '.fim')
+            cursor=$(echo "$resp" | jq -r '.cursor // empty')
+            total=$((total + cat))
+            pagina=$((pagina + 1))
+            echo "página $pagina: +$cat  (total $total)  fim=$fim"
+            if [ "$fim" = "true" ] || [ -z "$cursor" ]; then break; fi
+          done
+          echo "==== CATALOGAÇÃO CONCLUÍDA: $total arquivo(s) registrado(s) ===="
