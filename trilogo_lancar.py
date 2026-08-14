@@ -14,8 +14,13 @@ Segredos (GitHub):
 DEDUP: o motor só devolve o que ainda está em 1/4; e só move/marca quando o custo
 entra de fato. Se o sucesso não for confirmado, o arquivo fica onde está.
 """
-import os, re, sys, json, tempfile, urllib.request, urllib.error, urllib.parse
+import os, re, sys, json, tempfile, functools, urllib.request, urllib.error, urllib.parse
 from playwright.sync_api import sync_playwright
+
+# GitHub Actions faz buffer do stdout -> nada aparece no log até o fim.
+# Forçamos todo print a descarregar na hora, para acompanhar o progresso ao vivo.
+print = functools.partial(print, flush=True)
+print("== robô de lançamento: iniciando ==")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
 RKEY  = os.environ.get("ROBOT_KEY", "")
@@ -141,10 +146,12 @@ def lancar_um(page, it):
         print(f"[incerto] ticket {tk}: não vi confirmação de sucesso — NÃO vou mover"); return False
 
 def main():
+    print(f"buscando lista de orçamentos no motor ({MOTOR}) … (se o Render estiver 'dormindo', pode levar até ~1 min)")
     try:
         itens = _get("/robot/lancar_worklist").get("itens", [])
     except Exception as e:
         print("Falha ao obter worklist:", e); sys.exit(1)
+    print(f"worklist recebida: {len(itens)} orçamento(s) no total (pastas 1 e 4)")
     # nesta conta: processa os da aba correspondente + os "?" (tenta; se não abrir, pula)
     def _cabe(a):
         a = (a or "").upper()
