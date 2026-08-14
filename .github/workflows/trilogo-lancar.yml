@@ -24,6 +24,7 @@ jobs:
           ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
           LIMITE: ${{ vars.LIMITE }}
           ALVO: ${{ github.event.inputs.alvo }}
+          MODO: ${{ github.event.inputs.modo }}
           TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_INSTALACOES }}
           TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_INSTALACOES }}
           ABA: INSTALACOES
@@ -34,6 +35,7 @@ jobs:
           ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
           LIMITE: ${{ vars.LIMITE }}
           ALVO: ${{ github.event.inputs.alvo }}
+          MODO: ${{ github.event.inputs.modo }}
           TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_CIVIL }}
           TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_CIVIL }}
           ABA: CIVIL
