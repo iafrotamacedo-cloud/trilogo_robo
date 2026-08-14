@@ -38,6 +38,7 @@ EMAIL = os.environ["TRILOGO_EMAIL"]
 SENHA = os.environ["TRILOGO_SENHA"]
 ABA   = os.environ.get("ABA", "").upper()
 ALVO  = os.environ.get("ALVO", "").strip()   # "origem/arquivo" -> lança só esse; vazio = todos
+MODO  = (os.environ.get("MODO", "") or "lancar").strip()   # "conferir" = só lê custos, não lança
 LOGIN_URL = "https://mercadinhossaoluiz.trilogo.app/"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -102,6 +103,33 @@ def _click_js(page, pattern, tries=24, gap=500):
         page.wait_for_timeout(gap)
     return False
 
+_JS_CUSTOS = r"""
+() => {
+  const brl = s => { const m=(s||'').match(/R\$\s*([\d.]+),(\d{2})/); return m? parseFloat(m[1].replace(/\./g,'')+'.'+m[2]) : null; };
+  const cards = [...document.querySelectorAll('div')].filter(d=>{
+    const t=d.innerText||''; return /(m[aã]o de obra|materiais)/i.test(t) && /R\$\s*[\d.]+,\d{2}/.test(t) && t.length<250 && d.querySelectorAll('div').length<10;
+  });
+  const uniq = cards.filter((c,i)=> !cards.some((o,j)=>j<i && o.contains(c)));
+  return uniq.map(c=>({tipo:(c.innerText.match(/m[aã]o de obra|materiais/i)||[''])[0], valor: brl(c.innerText)})).filter(x=>x.valor!=null);
+}
+"""
+def conferir_um(page, it):
+    """Abre o ticket, lê os custos já lançados e reporta se há duplicata (por valor)."""
+    tk=it.get("ticket"); origem=it.get("origem"); nome=it.get("arquivo"); valor=it.get("valor")
+    if not tk:
+        _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
+              "custos":[],"duplicata":False,"aberto":False}); return
+    page.goto(f"https://mercadinhossaoluiz.trilogo.app/ticket/{tk}", wait_until="domcontentloaded")
+    page.wait_for_timeout(2500)
+    if "ticket" not in page.url: return   # da outra conta
+    _click_js(page, r"^\s*custos do ticket\s*$"); page.wait_for_timeout(1200)
+    try: custos = page.evaluate(_JS_CUSTOS) or []
+    except Exception: custos = []
+    dup = (valor is not None) and any(abs((c.get("valor") or -1) - float(valor)) <= 0.02 for c in custos)
+    print(f"  ticket {tk}: {len(custos)} custo(s) · duplicata={dup}", flush=True)
+    _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
+          "custos":custos,"duplicata":dup,"aberto":True})
+
 def lancar_um(page, it):
     """Cria o custo no ticket. Devolve True só se confirmar o sucesso."""
     tk = it.get("ticket"); origem = it.get("origem"); nome = it.get("arquivo")
@@ -119,7 +147,14 @@ def lancar_um(page, it):
         print(f"[skip] ticket {tk} não abriu nesta conta"); return False   # não marca falha (é da outra conta)
     # "Custos do ticket" é um <span>, NÃO um botão -> clique por JS (bubbla e expande)
     if not _click_js(page, r"^\s*custos do ticket\s*$"): return fail("não achei a seção 'Custos do ticket'")
-    page.wait_for_timeout(900)
+    page.wait_for_timeout(1000)
+    # TRAVA ANTI-DUPLICAÇÃO: se o ticket já tem um custo com este valor, NÃO lança de novo
+    try: custos = page.evaluate(_JS_CUSTOS) or []
+    except Exception: custos = []
+    if valor is not None and any(abs((c.get("valor") or -1) - float(valor)) <= 0.02 for c in custos):
+        print(f"[dup] ticket {tk}: já existe custo de R$ {_fmt_valor(valor)} — não lanço de novo (reconcilia)", flush=True)
+        _prog(nome, "já lançado", 100)
+        return True   # main move+marca (dedup) sem criar custo duplicado
     if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"): return fail("não apareceu 'Novo custo'")
     page.wait_for_timeout(1400)
     _prog(nome, "preenchendo", 45)
@@ -184,8 +219,9 @@ def main():
     lim = int(os.environ.get("LIMITE") or "0")   # LIMITE=1 -> testa com 1; 0/vazio -> todos
     if lim > 0:
         fila = fila[:lim]; print(f"MODO TESTE: LIMITE={lim} -> processando só {len(fila)}")
-    for x in fila: _prog(x["arquivo"], "aguardando", 0)   # popula a tela com a fila
-    print(f"conta {ABA}: {len(fila)} de {len(itens)} orçamento(s) na fila")
+    if MODO != "conferir":
+        for x in fila: _prog(x["arquivo"], "aguardando", 0)   # popula a tela com a fila
+    print(f"conta {ABA} [MODO={MODO}]: {len(fila)} de {len(itens)} orçamento(s) na fila")
     if not fila: print("nada a fazer nesta conta."); return
     feitos = 0
     with sync_playwright() as p:
@@ -201,13 +237,15 @@ def main():
         for idx, it in enumerate(fila, 1):
             print(f"[{idx}/{len(fila)}] ticket {it.get('ticket')} · {it.get('arquivo')}", flush=True)
             try:
-                if lancar_um(page, it):
+                if MODO == "conferir":
+                    conferir_um(page, it); feitos += 1
+                elif lancar_um(page, it):
                     r = _post("/robot/lancar_ok", {"origem": it["origem"], "nome": it["arquivo"]})
                     if r.get("ok"): feitos += 1; print(f"       movido: {it['arquivo']}")
             except Exception as e:
                 print(f"[erro] {it.get('arquivo')}: {str(e)[:160]}")
         br.close()
-    print(f"conta {ABA}: {feitos} lançado(s) e movido(s).")
+    print(f"conta {ABA} [MODO={MODO}]: {feitos} processado(s).")
 
 if __name__ == "__main__":
     try:
