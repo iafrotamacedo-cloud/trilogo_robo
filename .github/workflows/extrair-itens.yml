@@ -1,0 +1,27 @@
+name: FrotaHub → extrair itens dos orçamentos (auditoria)
+# Lê todos os PDFs montados (pastas 10 e 11) e gera itens_orcamentos.csv com
+# TODOS os itens (1 linha por item). Baixe o CSV no final, na seção "Artifacts".
+on:
+  workflow_dispatch:
+jobs:
+  extrair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Instalar dependências
+        run: pip install pdfplumber
+      - name: Extrair itens
+        env:
+          DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+        run: python extrair_itens_orcamentos.py
+      - name: Subir o CSV como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: itens_orcamentos
+          path: itens_orcamentos.csv
+          if-no-files-found: warn
