@@ -213,8 +213,16 @@ def conferir_um(page, it):
     if not tk:
         _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
               "custos":[],"veredito":"sem_ticket","aberto":False}); return
-    ok_conta, custos = _custos_api(page, tk)
-    if ok_conta is False:   # ticket de outra conta — não conta aqui
+    ok_conta, custos = (None, [])
+    for _t in range(3):                       # retry: erro transitório NÃO pode virar "sem custo"
+        ok_conta, custos = _custos_api(page, tk)
+        if ok_conta is not None: break
+        time.sleep(0.6)
+    if ok_conta is None:    # NÃO deu pra verificar -> não afirma que está livre pra lançar
+        print(f"  ticket {tk}: NÃO VERIFICADO (erro na API)", flush=True)
+        _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
+              "custos":[],"veredito":"nao_verificado","duplicata":False,"incerto":True,"aberto":True}); return
+    if ok_conta is False:   # ticket de outra conta — a outra conta confere
         print(f"  ticket {tk}: fora desta conta (pula)")
         _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
               "custos":[],"veredito":"outra_conta","aberto":False,"outra_conta":True}); return
