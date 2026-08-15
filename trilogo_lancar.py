@@ -12,8 +12,8 @@ Pega a lista no motor do FrotaHub, loga na conta e trabalha os orçamentos das p
               [ {..} ] -> já tem custo (Trílogo NÃO deixa inserir um 2º) => JÁ LANÇADO.
     Cada custo traz: type, totalValue, documentNumber, invoiceFiles[].fileName.
 
-MODO=conferir : só LÊ os custos pela API (segundos, sem abrir ticket) e reconcilia as
-                duplicatas (move 1->2 / 4->5 + marca lançado). NÃO lança, NÃO apaga.
+MODO=conferir : só LÊ os custos pela API (segundos) e REPORTA quais tickets já têm custo
+                (duplicidade). READ-ONLY: não move arquivo, não marca lançado, não lança.
 MODO=lancar   : para cada orçamento, PRÉ-CHECA por API; se já tem custo, só reconcilia
                 (sem abrir a tela); se não tem, abre "Custos do ticket > Novo custo",
                 sobe o PDF, Tipo=Materiais, Valor=TOTAL GERAL, Nº do documento=ticket, conclui.
@@ -83,6 +83,24 @@ def _fmt_valor(v):
 
 def _tipo_nome(t):
     return {1: "Mão de obra", 2: "Materiais", 3: "Mão de obra e Materiais"}.get(t, f"tipo {t}")
+
+def _custo_casa(custos, valor, arquivo):
+    """Retorna 'valor'/'arquivo' se algum custo do ticket corresponde a ESTE orçamento
+    (mesmo valor ou mesmo PDF) — sinal de que foi lançado (inclusive MANUALMENTE).
+    Retorna None se nenhum custo bate (custo é de outro orçamento => conflito real)."""
+    try: v = round(float(valor), 2) if valor is not None else None
+    except Exception: v = None
+    base_arq = os.path.splitext((arquivo or "").rsplit("/", 1)[-1].lower())[0]
+    for c in (custos or []):
+        cv = c.get("valor")
+        try: cv = round(float(cv), 2) if cv is not None else None
+        except Exception: cv = None
+        if v is not None and cv is not None and abs(cv - v) < 0.01:
+            return "valor"
+        pdf = os.path.splitext((c.get("pdf") or "").lower())[0]
+        if pdf and base_arq and pdf == base_arq:
+            return "arquivo"
+    return None
 
 def login(page):
     print("  login: abrindo tela…", flush=True)
@@ -184,28 +202,38 @@ _JS_CUSTOS_DOM = r"""
 
 # ---- CONFERÊNCIA (rápida, por API) -----------------------------------------------
 def conferir_um(page, it):
-    """Lê os custos do ticket pela API. Se houver custo => duplicata => reconcilia
-       (move 1->2/4->5 + marca lançado). Nunca lança, nunca apaga."""
-    tk=it.get("ticket"); origem=it.get("origem"); nome=it.get("arquivo"); valor=it.get("valor")
+    """Regra CERTA (usa a marca 'lancado' do BD como árbitro):
+       - ticket SEM custo no Trílogo            -> a lançar (não é duplicata), não move.
+       - ticket COM custo e orçamento lancado=1 -> foi ESTE que lançaram -> move (limpa 1->2/4->5).
+       - ticket COM custo e orçamento lancado=0 -> o custo é de OUTRO orçamento -> CONFLITO,
+                                                    NÃO move, deixa a nota onde está.
+       Nunca apaga."""
+    tk=it.get("ticket"); origem=it.get("origem"); nome=it.get("arquivo")
+    valor=it.get("valor"); lancado_bd=bool(it.get("lancado"))
     if not tk:
         _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-              "custos":[],"duplicata":False,"aberto":False}); return
+              "custos":[],"veredito":"sem_ticket","aberto":False}); return
     ok_conta, custos = _custos_api(page, tk)
-    if ok_conta is False:   # ticket de outra conta — não conta como conferido aqui
+    if ok_conta is False:   # ticket de outra conta — não conta aqui
         print(f"  ticket {tk}: fora desta conta (pula)")
         _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-              "custos":[],"duplicata":False,"aberto":False,"outra_conta":True}); return
-    dup = len(custos) >= 1   # qualquer custo = já lançado (Trílogo não deixa 2º)
-    reconciliado = False
-    if dup:   # limpa AGORA (move+marca) — resultado gravado mesmo se o processo cair depois
-        try:
-            r = _post("/robot/lancar_ok", {"origem": origem, "nome": nome})
-            reconciliado = bool(r.get("ok"))
-        except Exception as e:
-            print(f"  ticket {tk}: falha ao reconciliar ({str(e)[:80]})", flush=True)
-    print(f"  ticket {tk}: {len(custos)} custo(s) · duplicata={dup} · reconciliado={reconciliado}", flush=True)
+              "custos":[],"veredito":"outra_conta","aberto":False,"outra_conta":True}); return
+    tem_custo = len(custos) >= 1
+    veredito=""
+    # READ-ONLY: a conferência NÃO move nem marca nada — só detecta e reporta a duplicidade.
+    if not tem_custo:
+        veredito="a_lancar"                                     # ticket sem custo -> pode lançar
+    elif lancado_bd:
+        veredito="ja_lancado"                                   # sistema já lançou este
+    elif _custo_casa(custos, valor, nome):
+        veredito="lancado_manual"                               # lançado NA MÃO (valor/PDF batem)
+    else:
+        veredito="conflito"                                     # custo é de OUTRO orçamento
+    print(f"  ticket {tk}: custos={len(custos)} lancado_bd={lancado_bd} -> {veredito} (read-only)", flush=True)
     _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-          "custos":custos,"duplicata":dup,"reconciliado":reconciliado,"aberto":True})
+          "custos":custos,"veredito":veredito,
+          "duplicata":(veredito in ("ja_lancado","lancado_manual","conflito")),
+          "reconciliado":False,"conflito":(veredito=="conflito"),"aberto":True})
     time.sleep(0.06)   # gentileza com a API
 
 # ---- LANÇAMENTO real (com pré-checagem por API) ----------------------------------
@@ -218,14 +246,18 @@ def lancar_um(page, it):
         if marca: _prog(nome, "falha", 0)
         return False
     if not tk: return fail("sem ticket associado")
+    lancado_bd = bool(it.get("lancado"))
 
-    # PRÉ-CHECAGEM POR API: se já tem custo, NÃO abre a tela — só reconcilia (move+marca).
+    # PRÉ-CHECAGEM POR API: se o ticket já tem custo, decide pela marca 'lancado' do BD.
     ok_conta, custos_api = _custos_api(page, tk)
     if ok_conta and custos_api:
-        print(f"[dup-api] ticket {tk}: já tem custo ({', '.join(str(c.get('tipo')) for c in custos_api)}) "
-              f"— reconcilia sem abrir a tela", flush=True)
-        _prog(nome, "já lançado", 100)
-        return True   # main chama /robot/lancar_ok e move (dedup)
+        if lancado_bd or _custo_casa(custos_api, valor, nome):
+            print(f"[ja-lancado] ticket {tk}: custo é deste orçamento (sistema ou manual) — reconcilia, não relança", flush=True)
+            _prog(nome, "já lançado", 100)
+            return True                      # main move (1->2 / 4->5)
+        print(f"[conflito] ticket {tk}: já tem custo de OUTRO orçamento — NÃO lanço, deixo a nota onde está", flush=True)
+        _prog(nome, "conflito: ticket já tem custo de outro orçamento", 0)
+        return False                         # NÃO move (main só move se retornar True)
     # (ok_conta False/None cai no fluxo normal: a própria tela confirma se é desta conta)
 
     _prog(nome, "abrindo ticket", 15)
@@ -241,9 +273,13 @@ def lancar_um(page, it):
     try: custos = page.evaluate(_JS_CUSTOS_DOM) or []
     except Exception: custos = []
     if custos:
-        print(f"[dup] ticket {tk}: já tem custo ({', '.join(c.get('tipo','?') for c in custos)}) — não lanço (reconcilia)", flush=True)
-        _prog(nome, "já lançado", 100)
-        return True
+        if lancado_bd or _custo_casa(custos, valor, nome):
+            print(f"[ja-lancado] ticket {tk}: custo (tela) é deste orçamento — reconcilia", flush=True)
+            _prog(nome, "já lançado", 100)
+            return True
+        print(f"[conflito] ticket {tk}: já tem custo (tela) de OUTRO orçamento — não lanço, deixo onde está", flush=True)
+        _prog(nome, "conflito: ticket já tem custo de outro orçamento", 0)
+        return False
     if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"): return fail("não apareceu 'Novo custo'")
     page.wait_for_timeout(1400)
     _prog(nome, "preenchendo", 45)
