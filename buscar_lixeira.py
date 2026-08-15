@@ -16,7 +16,7 @@ import os, json, urllib.parse, urllib.request, urllib.error
 APP_KEY = os.environ.get("DROPBOX_APP_KEY", "")
 APP_SEC = os.environ.get("DROPBOX_APP_SECRET", "")
 REFRESH = os.environ.get("DROPBOX_REFRESH_TOKEN", "")
-BASE    = os.environ.get("DROPBOX_BASE", "/FROTAHUB/2 - MANUTENCAO").rstrip("/")
+BASE    = (os.environ.get("DROPBOX_BASE") or "/FROTAHUB/2 - MANUTENCAO").rstrip("/")
 RESTAURAR = os.environ.get("RESTAURAR", "0") == "1"
 
 # pastas a varrer (nome exato no Dropbox)
