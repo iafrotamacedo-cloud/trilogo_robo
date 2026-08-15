@@ -338,6 +338,10 @@ def main():
         a = (a or "").upper()
         return (a == ABA) or (a in ("", "?"))
     fila = [x for x in itens if _cabe(x.get("aba"))]
+    if MODO != "conferir":   # nunca LANÇA um arquivo sem registro no BD (não rastreado)
+        _sr=[x for x in fila if x.get("sem_registro")]
+        if _sr: print(f"pulando {len(_sr)} sem registro no BD: "+", ".join(x['arquivo'] for x in _sr[:5]))
+        fila=[x for x in fila if not x.get("sem_registro")]
     if ALVO:   # lançar só um orçamento específico (botão 'Lançar' da linha)
         fila = [x for x in fila if f"{x['origem']}/{x['arquivo']}" == ALVO or x["arquivo"] == ALVO]
         print(f"ALVO único: {ALVO} -> {len(fila)} item(ns)")
