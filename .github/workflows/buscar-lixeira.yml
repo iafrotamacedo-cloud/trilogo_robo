@@ -1,0 +1,26 @@
+name: FrotaHub → buscar na lixeira do Dropbox (orçamentos sumidos)
+# Varre a lixeira das pastas 1/4/2/5/10/11 e localiza os 19 orçamentos não-lançados
+# que sumiram. Rode primeiro com restaurar=false (só lista). Depois true para restaurar.
+on:
+  workflow_dispatch:
+    inputs:
+      restaurar:
+        description: "false = só lista o que achou · true = restaura os arquivos"
+        required: true
+        default: "false"
+jobs:
+  lixeira:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Buscar (e opcionalmente restaurar)
+        env:
+          DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          DROPBOX_BASE:          ${{ secrets.DROPBOX_BASE }}
+          RESTAURAR:             ${{ github.event.inputs.restaurar == 'true' && '1' || '0' }}
+        run: python buscar_lixeira.py
