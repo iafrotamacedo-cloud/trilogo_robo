@@ -1,0 +1,25 @@
+name: FrotaHub → recuperar montados (copiar 10/11 → pasta 1)
+# Copia de volta pra pasta 1 os orçamentos não-lançados que sumiram mas ainda
+# têm cópia montada na pasta 10/11. Rode com aplicar=false (plano) e depois true.
+on:
+  workflow_dispatch:
+    inputs:
+      aplicar:
+        description: "false = só mostra o plano · true = copia de verdade"
+        required: true
+        default: "false"
+jobs:
+  recuperar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Copiar montados de volta
+        env:
+          DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          APLICAR:               ${{ github.event.inputs.aplicar == 'true' && '1' || '0' }}
+        run: python recuperar_montados.py
