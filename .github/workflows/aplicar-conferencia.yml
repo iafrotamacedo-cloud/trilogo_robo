@@ -1,0 +1,36 @@
+name: FrotaHub → aplicar conferência (marcar lançado + rotear pastas)
+# Lê conferencia.json (a verdade da conferência do Trílogo) e manda pro motor:
+#  - marca 'lancado' no banco (lançado=true / não lançado=false)
+#  - roteia as pastas do Dropbox (não lançado -> 1/4, lançado -> 2/5)
+# Rode PRIMEIRO com dry_run=true (só mostra o plano). Depois dry_run=false pra aplicar.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true = só mostra o plano (não muda nada) · false = aplica"
+        required: true
+        default: "true"
+jobs:
+  aplicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enviar ao motor
+        env:
+          MOTOR_URL: ${{ secrets.MOTOR_URL }}
+          ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
+          DRY: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          if [ ! -f conferencia.json ]; then echo "conferencia.json não está no repo!"; exit 1; fi
+          # monta o corpo: itens (do arquivo) + dry_run
+          body=$(jq -c --argjson dry $([ "$DRY" = "false" ] && echo false || echo true) '. + {dry_run:$dry}' conferencia.json)
+          resp=$(curl -sS -X POST "$MOTOR_URL/orc/aplicar_conferencia" \
+                   -H "x-robot-key: $ROBOT_KEY" \
+                   -H "content-type: application/json" -d "$body")
+          echo "$resp" | jq '{dry_run, resumo, aplicados, erros: (.erros // [] | length)}'
+          echo ""
+          echo "=== AMOSTRA DO PLANO (até 20) ==="
+          echo "$resp" | jq -r '(.amostra // [])[] | "  ticket \(.ticket) R$\(.valor)  pasta \(.de_pasta)->\(.para_pasta)  lancado=\(.para_lancado)"'
+          echo "=== ITENS DA CONFERÊNCIA SEM PAR NO BANCO (até 20) ==="
+          echo "$resp" | jq -r '(.sem_par_no_db // [])[] | "  ticket \(.ticket) R$\(.valor)"'
