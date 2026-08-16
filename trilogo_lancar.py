@@ -35,7 +35,7 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = "form-fix-8 (tipo commitado com ENTER — clicar a opção não gravava, Concluir ficava desabilitado)"
+ROBOT_LANCAR_REV = "form-fix-9 (anexa a NOTA FISCAL no dropzone certo — obrigatória p/ habilitar Concluir + fail-fast)"
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -263,11 +263,14 @@ def _click_js(page, pattern, tries=24, gap=500):
 _JS_MARK_ANEXO = r"""
 () => {
   const ins=[...document.querySelectorAll('input[type=file]')];
-  // preferir o input de anexo DO CUSTO manual (evita o leitor de nota fiscal por IA)
-  let alvo = ins.find(e => /relacionados a este custo|outros arquivos/i.test(((e.closest('div')||{}).textContent)||''));
-  if(!alvo && ins.length) alvo = ins[ins.length-1];   // fallback: o último
+  // ANEXA COMO NOTA FISCAL (invoice). A API do Trílogo EXIGE a nota fiscal quando há Nº do
+  // documento ("Necessário anexar a nota fiscal referente ao número informado") — sem ela o
+  // "Concluir" fica DESABILITADO. Por isso miramos o dropzone da NOTA FISCAL (não o de "outros
+  // arquivos", que era o erro). É o 1º input do modal.
+  let alvo = ins.find(e => /nota fiscal/i.test(((e.closest('div')||{}).textContent)||''));
+  if(!alvo && ins.length) alvo = ins[0];   // fallback: o primeiro (dropzone principal)
   if(!alvo) return null;
-  if(!alvo.id) alvo.id = 'robo_anexo_custo';
+  if(!alvo.id) alvo.id = 'robo_anexo_nf';
   return '#'+alvo.id;
 }
 """
@@ -401,19 +404,26 @@ def lancar_um(page, it):
     except Exception:
         return fail("form manual de 'Novo custo' não abriu (a tela do Trílogo mudou)")
     page.wait_for_timeout(600)
-    # anexa o orçamento NO input de anexo DO CUSTO ("outros arquivos relacionados a este custo"),
-    # NUNCA no dropzone da nota fiscal (esse dispararia o leitor de IA). O input é oculto ->
-    # marco por JS e uso set_input_files (funciona em input file oculto). Anexo é best-effort.
+    # anexa o orçamento como NOTA FISCAL (OBRIGATÓRIO — sem ela o Concluir não habilita quando há
+    # Nº do documento). Vai no dropzone da nota fiscal; isso dispara o leitor de IA, então DEPOIS
+    # esperamos a IA assentar e, se ela trocar a tela, reabrimos o form manual. Preencher os campos
+    # vem DEPOIS do anexo, pra sobrescrever qualquer chute da IA.
     pdf = _baixa_pdf(origem, nome)
     try:
         sel = page.evaluate(_JS_MARK_ANEXO)
-        if sel:
-            page.set_input_files(sel, pdf)
-            page.wait_for_timeout(2500)
-        else:
-            print(f"[aviso] ticket {tk}: não achei o campo de anexo do custo — sigo sem anexar", flush=True)
+        if not sel:
+            return fail("não achei o dropzone da nota fiscal para anexar")
+        page.set_input_files(sel, pdf)
+        print(f"  ticket {tk}: nota fiscal anexada — aguardando o leitor de IA assentar…", flush=True)
+        page.wait_for_timeout(7000)   # dá tempo da IA processar o PDF
     except Exception as e:
-        print(f"[aviso] ticket {tk}: não anexei o PDF ({str(e)[:80]}) — sigo preenchendo", flush=True)
+        return fail(f"não anexei a nota fiscal ({str(e)[:80]})")
+    # a IA pode ter trocado a tela; garante que o form manual está presente (reabre se sumiu)
+    if page.locator("#serviceCost").count() == 0 or not page.locator("#serviceCost").first.is_visible():
+        _click_js(page, r"preencher.*manual", tries=8, gap=500)
+        try: page.wait_for_selector("#serviceCost", state="visible", timeout=10000)
+        except Exception: return fail("form manual não voltou após anexar a nota fiscal")
+        page.wait_for_timeout(400)
     # Tipo de custo = Mão de obra (ant-select #costType). ATENÇÃO: o Trílogo EXIBE "Mão de obra"
     # por padrão, mas NÃO grava esse valor no formulário até você ESCOLHER a opção ATIVAMENTE —
     # sem isso o campo conta como vazio e o "Concluir" fica DESABILITADO (era a causa do
@@ -478,12 +488,15 @@ def lancar_um(page, it):
         }""")
         print(f"  ticket {tk}: [pré-concluir] tipo='{_st.get('tipo')}' valor='{_st.get('valor')}' "
               f"doc='{_st.get('doc')}' concluir_disabled={_st.get('concluir_disabled')}", flush=True)
+        # FAIL-FAST: se o Concluir está desabilitado, não adianta clicar (falha em segundos, não em minutos)
+        if _st.get("concluir_disabled") is True:
+            return fail("Concluir desabilitado (provável nota fiscal faltando ou campo não commitado) — não insisto")
     except Exception as _e:
         print(f"  ticket {tk}: [pré-concluir] não li estado ({str(_e)[:60]})", flush=True)
     # clica Concluir de VERDADE (Playwright), esperando o botão habilitar (o form valida tipo+valor)
     try:
         btn = page.get_by_role("button", name=re.compile(r"^\s*concluir\s*$", re.I)).first
-        for _ in range(20):
+        for _ in range(10):
             try:
                 if btn.is_enabled(): break
             except Exception: pass
