@@ -160,23 +160,32 @@ def login(page):
     tk = _token(page)
     ci = _company(page)
     print("  login: ok" + ("" if tk else " (ATENÇÃO: token não encontrado no localStorage!)")
-          + f" — empresa/companyGroup = {ci.get('id')} ({ci.get('name')})", flush=True)
+          + f" — usuário={ci.get('email')} · companyGroup={ci.get('id')} ({ci.get('name')})", flush=True)
     if ci.get("name") and ("mercadinho" not in str(ci.get("name")).lower()):
         print(f"  ⚠️ ATENÇÃO: a sessão do robô NÃO está no Mercadinhos São Luiz e sim em '{ci.get('name')}' "
               f"(companyGroup {ci.get('id')}). As consultas de custo/existência vão sair ERRADAS.", flush=True)
+    # AUTO-TESTE de diagnóstico: o que ESTA sessão enxerga p/ tickets-chave (comparar com a verdade)
+    for _tk in ("126713","126039","126400","126670","125973","126454"):
+        try:
+            _ex = _ticket_existe(page, _tk)
+            _ok, _cs = _custos_api(page, _tk)
+            print(f"  [selftest] ticket {_tk}: existe={_ex} custos={len(_cs)} docs={[c.get('doc') for c in _cs]}", flush=True)
+        except Exception as _e:
+            print(f"  [selftest] ticket {_tk}: erro {str(_e)[:60]}", flush=True)
 
 def _company(page):
-    """Lê companyGroupId/Name do token da sessão (pra conferir em QUAL cliente o robô está)."""
+    """Lê companyGroupId/Name/email do token da sessão (pra conferir QUEM/QUAL cliente o robô usa)."""
     try:
         return page.evaluate("""() => {
           try {
             const t = JSON.parse(localStorage.getItem('session')||'{}').accessToken;
             const c = JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
-            return { id: c['custom:companyGroupId'] || null, name: c['custom:companyGroupName'] || null };
-          } catch(e) { return { id:null, name:null }; }
+            return { id: c['custom:companyGroupId'] || null, name: c['custom:companyGroupName'] || null,
+                     email: c['email'] || c['custom:unique_name'] || null };
+          } catch(e) { return { id:null, name:null, email:null }; }
         }""")
     except Exception:
-        return {"id": None, "name": None}
+        return {"id": None, "name": None, "email": None}
 
 def _token(page):
     try:
@@ -361,18 +370,38 @@ def lancar_um(page, it):
     if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"): return fail("não apareceu 'Novo custo'")
     page.wait_for_timeout(1400)
     _prog(nome, "preenchendo", 45)
-    # abre o formulário manual (pula a IA de leitura de nota)
-    if not _click_js(page, r"preencher.*manual", tries=8):
-        print(f"[aviso] ticket {tk}: link 'Preencher manualmente' não achado — seguindo assim mesmo")
-    page.wait_for_timeout(900)
-    # anexa o orçamento no 1º dropzone (nota fiscal) ANTES de preencher
+    # O "Novo custo" agora abre LIDERANDO com a IA de leitura de nota fiscal; é preciso clicar
+    # "Preencher informações manualmente" pra revelar o form manual (input file, #costType, #serviceCost…).
+    manual_ok = False
+    for _t in range(12):
+        for _loc in (
+            lambda: page.get_by_role("button", name=re.compile(r"preencher.*manual", re.I)),
+            lambda: page.get_by_text(re.compile(r"preencher.*(informa|manual)", re.I)),
+        ):
+            try:
+                el = _loc()
+                if el.count() > 0:
+                    el.first.click(timeout=2500); manual_ok = True; break
+            except Exception:
+                pass
+        if manual_ok: break
+        page.wait_for_timeout(500)
+    if not manual_ok:
+        print(f"[aviso] ticket {tk}: não cliquei 'Preencher informações manualmente' — tentando seguir", flush=True)
+    # espera o FORM MANUAL carregar (campo de valor ou de arquivo). Se não abrir, é mudança de tela.
+    try:
+        page.wait_for_selector("#serviceCost, input[type=file]", timeout=15000)
+    except Exception:
+        return fail("form manual de 'Novo custo' não abriu (a tela do Trílogo mudou)")
+    page.wait_for_timeout(600)
+    # anexa o orçamento no dropzone (nota fiscal) ANTES de preencher
     pdf = _baixa_pdf(origem, nome)
     try:
-        page.wait_for_selector("input[type=file]", timeout=15000)
+        page.wait_for_selector("input[type=file]", timeout=10000)
         page.locator("input[type=file]").first.set_input_files(pdf)
         page.wait_for_timeout(3500)
     except Exception as e:
-        print(f"[aviso] ticket {tk}: não anexei o PDF ({e}) — sigo preenchendo")
+        print(f"[aviso] ticket {tk}: não anexei o PDF ({str(e)[:80]}) — sigo preenchendo", flush=True)
     # Tipo de custo = Materiais  (ant-select #costType)
     try:
         page.locator("#costType").click(timeout=5000); page.wait_for_timeout(400)
