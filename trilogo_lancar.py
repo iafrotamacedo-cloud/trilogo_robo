@@ -35,7 +35,7 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = "form-fix-4 (tipo Mão de obra: mantém o padrão; só abre o dropdown se preciso)"
+ROBOT_LANCAR_REV = "form-fix-5 (tipo: SEMPRE escolhe a opção + valor com vírgula '60,96' + confirma por toast ou modal fechar)"
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -413,39 +413,34 @@ def lancar_um(page, it):
             print(f"[aviso] ticket {tk}: não achei o campo de anexo do custo — sigo sem anexar", flush=True)
     except Exception as e:
         print(f"[aviso] ticket {tk}: não anexei o PDF ({str(e)[:80]}) — sigo preenchendo", flush=True)
-    # Tipo de custo = Mão de obra (ant-select #costType). O Trílogo JÁ ABRE com "Mão de obra"
-    # selecionado; nesse caso não tocamos no dropdown (clicar no #costType é interceptado pelo
-    # <span> do valor -> o clique falha). Só se vier outro valor é que abrimos e escolhemos.
-    # O '$' evita casar com a opção combinada "Mão de obra e Materiais".
+    # Tipo de custo = Mão de obra (ant-select #costType). ATENÇÃO: o Trílogo EXIBE "Mão de obra"
+    # por padrão, mas NÃO grava esse valor no formulário até você ESCOLHER a opção ATIVAMENTE —
+    # sem isso o campo conta como vazio e o "Concluir" fica DESABILITADO (era a causa do
+    # "não vi confirmação de sucesso"). Então SEMPRE abrimos e escolhemos. O input fica atrás do
+    # <span> do valor, então abrimos pelo CONTAINER (.ant-select-selector), não pelo input.
     ALVO_TIPO = r"^\s*m[aã]o de obra\s*$"
     try:
-        _cur = page.evaluate("""() => {
-          const inp=document.querySelector('#costType');
-          const box=inp && inp.closest('.ant-select');
-          const it=box && box.querySelector('.ant-select-selection-item');
-          return it ? ((it.getAttribute('title')||it.textContent||'').trim()) : '';
-        }""") or ""
-    except Exception:
-        _cur = ""
-    if re.match(ALVO_TIPO, _cur, re.I):
-        print(f"  ticket {tk}: tipo de custo já é '{_cur}' — mantém", flush=True)
-    else:
+        box = page.locator("#costType").locator("xpath=ancestor::div[contains(@class,'ant-select')][1]")
+        sel = box.locator(".ant-select-selector").first
+        try: sel.click(timeout=4000)
+        except Exception: sel.click(timeout=4000, force=True)
+        page.wait_for_timeout(500)
         try:
-            # abre pelo CONTAINER (.ant-select-selector), não pelo input (que fica atrás do valor)
-            box = page.locator("#costType").locator("xpath=ancestor::div[contains(@class,'ant-select')][1]")
-            sel = box.locator(".ant-select-selector").first
-            try: sel.click(timeout=4000)
-            except Exception: sel.click(timeout=4000, force=True)
-            page.wait_for_timeout(500)
-            try: page.get_by_role("option", name=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
-            except Exception: page.locator(".ant-select-item-option", has_text=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
-        except Exception as e:
-            return fail(f"não setei 'Mão de obra' ({e})")
-    # Valor = #serviceCost  (máscara de moeda -> digita os centavos)
+            page.get_by_role("option", name=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
+        except Exception:
+            try:
+                page.locator(".ant-select-item-option", has_text=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
+            except Exception:
+                page.keyboard.press("Enter")   # fallback: Enter escolhe a opção destacada (padrão = Mão de obra)
+        page.wait_for_timeout(300)
+    except Exception as e:
+        return fail(f"não setei 'Mão de obra' ({e})")
+    # Valor = #serviceCost. A máscara NÃO preenche por centavos: digitar "6096" vira R$ 6.096
+    # (cem vezes maior!). O certo é digitar com VÍRGULA decimal -> "60,96" vira R$ 60,96.
     try:
-        cents = str(int(round(float(valor) * 100)))
+        val_str = f"{float(valor):.2f}".replace(".", ",")   # 60.96 -> "60,96"
         v = page.locator("#serviceCost"); v.click(); page.keyboard.press("Control+A"); page.keyboard.press("Delete")
-        v.type(cents, delay=40)
+        v.type(val_str, delay=60)
     except Exception as e:
         return fail(f"campo Valor ({e})")
     # Número do documento = ticket  (#documentNumber)
@@ -457,12 +452,16 @@ def lancar_um(page, it):
     _prog(nome, "concluindo", 90)
     page.wait_for_timeout(400)
     if not _click_js(page, r"^\s*concluir\s*$", tries=6): return fail("não achei 'Concluir'")
-    # confirma sucesso (toast)
+    # confirma sucesso: aceita o toast OU o fechamento do modal (o #serviceCost some).
     try:
         page.get_by_text(re.compile(r"custo inserido com sucesso|sucesso", re.I)).first.wait_for(timeout=12000)
         print(f"[ok] ticket {tk}: custo lançado (R$ {_fmt_valor(valor)})"); return True
     except Exception:
-        return fail("não vi confirmação de sucesso — NÃO vou mover")
+        try:
+            page.wait_for_selector("#serviceCost", state="detached", timeout=4000)
+            print(f"[ok] ticket {tk}: custo lançado — modal fechou (R$ {_fmt_valor(valor)})"); return True
+        except Exception:
+            return fail("não vi confirmação de sucesso — NÃO vou mover")
 
 def main():
     print(f"PASSO A: buscando lista no motor ({MOTOR}/robot/lancar_worklist) …")
