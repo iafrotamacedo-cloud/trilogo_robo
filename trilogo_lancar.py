@@ -160,7 +160,7 @@ def login(page):
     tk = _token(page)
     ci = _company(page)
     print("  login: ok" + ("" if tk else " (ATENÇÃO: token não encontrado no localStorage!)")
-          + f" — usuário={ci.get('email')} · companyGroup={ci.get('id')} ({ci.get('name')})", flush=True)
+          + f" — pessoa={ci.get('pessoa')} · usuário={ci.get('email')} · companyGroup={ci.get('id')} ({ci.get('name')})", flush=True)
     if ci.get("name") and ("mercadinho" not in str(ci.get("name")).lower()):
         print(f"  ⚠️ ATENÇÃO: a sessão do robô NÃO está no Mercadinhos São Luiz e sim em '{ci.get('name')}' "
               f"(companyGroup {ci.get('id')}). As consultas de custo/existência vão sair ERRADAS.", flush=True)
@@ -181,8 +181,9 @@ def _company(page):
             const t = JSON.parse(localStorage.getItem('session')||'{}').accessToken;
             const c = JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
             return { id: c['custom:companyGroupId'] || null, name: c['custom:companyGroupName'] || null,
-                     email: c['email'] || c['custom:unique_name'] || null };
-          } catch(e) { return { id:null, name:null, email:null }; }
+                     email: c['email'] || c['custom:unique_name'] || null,
+                     pessoa: c['custom:given_name'] || c['name'] || c['cognito:username'] || null };
+          } catch(e) { return { id:null, name:null, email:null, pessoa:null }; }
         }""")
     except Exception:
         return {"id": None, "name": None, "email": None}
