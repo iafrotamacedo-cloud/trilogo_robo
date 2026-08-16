@@ -35,7 +35,7 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = "form-fix-5 (tipo: SEMPRE escolhe a opção + valor com vírgula '60,96' + confirma por toast ou modal fechar)"
+ROBOT_LANCAR_REV = "form-fix-6 (abre o ant-select do tipo por CSS :has() — corrige o timeout do xpath ancestor)"
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -420,18 +420,21 @@ def lancar_um(page, it):
     # <span> do valor, então abrimos pelo CONTAINER (.ant-select-selector), não pelo input.
     ALVO_TIPO = r"^\s*m[aã]o de obra\s*$"
     try:
-        box = page.locator("#costType").locator("xpath=ancestor::div[contains(@class,'ant-select')][1]")
-        sel = box.locator(".ant-select-selector").first
-        try: sel.click(timeout=4000)
-        except Exception: sel.click(timeout=4000, force=True)
-        page.wait_for_timeout(500)
+        # abre o dropdown clicando no CONTAINER do ant-select do #costType. Uso CSS :has() em vez
+        # de xpath ancestor: o ancestor casava também com div.ant-select-SELECTOR (o nome contém
+        # 'ant-select'), e o seletor de dentro dele não existia -> dava timeout.
+        sel = page.locator(".ant-select:has(#costType) .ant-select-selector").first
+        try: sel.click(timeout=5000)
+        except Exception: sel.click(timeout=5000, force=True)
+        page.wait_for_timeout(600)
+        # escolhe "Mão de obra" ATIVAMENTE (opção). Se não achar, Enter pega a destacada (padrão).
         try:
             page.get_by_role("option", name=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
         except Exception:
             try:
                 page.locator(".ant-select-item-option", has_text=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
             except Exception:
-                page.keyboard.press("Enter")   # fallback: Enter escolhe a opção destacada (padrão = Mão de obra)
+                page.keyboard.press("Enter")
         page.wait_for_timeout(300)
     except Exception as e:
         return fail(f"não setei 'Mão de obra' ({e})")
