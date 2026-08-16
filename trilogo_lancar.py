@@ -35,7 +35,7 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = "form-fix-6 (abre o ant-select do tipo por CSS :has() — corrige o timeout do xpath ancestor)"
+ROBOT_LANCAR_REV = "form-fix-7 (log de diagnóstico pré-concluir + clique real do Concluir esperando habilitar)"
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -453,15 +453,40 @@ def lancar_um(page, it):
     except Exception as e:
         return fail(f"campo Documento ({e})")
     _prog(nome, "concluindo", 90)
-    page.wait_for_timeout(400)
-    if not _click_js(page, r"^\s*concluir\s*$", tries=6): return fail("não achei 'Concluir'")
+    page.wait_for_timeout(500)
+    # DIAGNÓSTICO: estado real do form antes de concluir (pra achar exatamente o que trava)
+    try:
+        _st = page.evaluate(r"""() => {
+          const fis=[...document.querySelectorAll('.ant-form-item')];
+          const fi=fis.find(f=>{const l=f.querySelector('label'); return l && l.textContent && l.textContent.includes('Tipo de custo');});
+          const tipo=(fi&&fi.querySelector('.ant-select-selection-item')||{}).textContent||'';
+          const sc=document.querySelector('#serviceCost'), dn=document.querySelector('#documentNumber');
+          const btns=[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null);
+          const c=btns.find(b=>/^\s*concluir\s*$/i.test((b.textContent||'').trim()));
+          return {tipo:tipo.trim(), valor:(sc?sc.value:''), doc:(dn?dn.value:''), concluir_disabled:(c? !!c.disabled : null)};
+        }""")
+        print(f"  ticket {tk}: [pré-concluir] tipo='{_st.get('tipo')}' valor='{_st.get('valor')}' "
+              f"doc='{_st.get('doc')}' concluir_disabled={_st.get('concluir_disabled')}", flush=True)
+    except Exception as _e:
+        print(f"  ticket {tk}: [pré-concluir] não li estado ({str(_e)[:60]})", flush=True)
+    # clica Concluir de VERDADE (Playwright), esperando o botão habilitar (o form valida tipo+valor)
+    try:
+        btn = page.get_by_role("button", name=re.compile(r"^\s*concluir\s*$", re.I)).first
+        for _ in range(20):
+            try:
+                if btn.is_enabled(): break
+            except Exception: pass
+            page.wait_for_timeout(300)
+        btn.click(timeout=6000)
+    except Exception as e:
+        if not _click_js(page, r"^\s*concluir\s*$", tries=6): return fail(f"não cliquei 'Concluir' ({str(e)[:60]})")
     # confirma sucesso: aceita o toast OU o fechamento do modal (o #serviceCost some).
     try:
         page.get_by_text(re.compile(r"custo inserido com sucesso|sucesso", re.I)).first.wait_for(timeout=12000)
         print(f"[ok] ticket {tk}: custo lançado (R$ {_fmt_valor(valor)})"); return True
     except Exception:
         try:
-            page.wait_for_selector("#serviceCost", state="detached", timeout=4000)
+            page.wait_for_selector("#serviceCost", state="detached", timeout=6000)
             print(f"[ok] ticket {tk}: custo lançado — modal fechou (R$ {_fmt_valor(valor)})"); return True
         except Exception:
             return fail("não vi confirmação de sucesso — NÃO vou mover")
