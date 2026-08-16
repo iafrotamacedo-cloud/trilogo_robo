@@ -102,6 +102,46 @@ def _custo_casa(custos, valor, arquivo):
             return "arquivo"
     return None
 
+def _custo_do_ticket(custos, tk):
+    """Só os custos cujo 'documento' (documentNumber) é o PRÓPRIO ticket — descarta o
+    custo FANTASMA que a API às vezes devolve para ticket inexistente/errado."""
+    tks = str(tk).strip()
+    return [c for c in (custos or []) if str(c.get("doc") or "").strip() == tks]
+
+def _tem_custo_real(custos, tk, valor, nome):
+    """Custo conta como REAL se pertence ao ticket (documento == ticket) OU casa com
+    ESTE orçamento (valor/arquivo). Ignora fantasma."""
+    return bool(_custo_do_ticket(custos, tk)) or bool(_custo_casa(custos, valor, nome))
+
+# ---- Existência do ticket (a API de custos devolve fantasma p/ ticket inexistente) ----
+_JS_EXISTE = r"""
+async (tk) => {
+  const s = JSON.parse(localStorage.getItem('session') || '{}');
+  const tkn = s.accessToken;
+  if (!tkn) return { status: 0, existe: null };
+  try {
+    const r = await fetch('https://web.api.trilogo.app/api/Ticket/ListTicketsByUser',
+      { method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+tkn},
+        body: JSON.stringify({ searchTerm: String(tk), page:1, pageSize:20 }) });
+    let j = null; try { j = await r.json(); } catch(e) {}
+    const arr = (j && Array.isArray(j.tickets)) ? j.tickets : [];
+    const existe = arr.some(t => String(t.id) === String(tk));
+    return { status: r.status, existe: existe };
+  } catch (e) { return { status: -1, existe: null }; }
+}
+"""
+
+def _ticket_existe(page, tk):
+    """True/False se o ticket existe no Trílogo; None se não deu pra verificar."""
+    try:
+        r = page.evaluate(_JS_EXISTE, str(tk))
+    except Exception:
+        return None
+    if r.get("status") == 200:
+        return bool(r.get("existe"))
+    return None
+
 def login(page):
     print("  login: abrindo tela…", flush=True)
     page.goto(LOGIN_URL, wait_until="domcontentloaded")   # networkidle trava em SPA
@@ -226,18 +266,25 @@ def conferir_um(page, it):
         print(f"  ticket {tk}: fora desta conta (pula)")
         _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
               "custos":[],"veredito":"outra_conta","aberto":False,"outra_conta":True}); return
-    tem_custo = len(custos) >= 1
+    # EXISTÊNCIA: a API de custos devolve custo FANTASMA p/ ticket inexistente -> valida antes
+    existe = _ticket_existe(page, tk)
+    if existe is False:
+        print(f"  ticket {tk}: NÃO EXISTE no Trílogo — número errado (NÃO é duplicata)", flush=True)
+        _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
+              "custos":[],"veredito":"ticket_inexistente","duplicata":False,"inexistente":True,"aberto":True}); return
+    # custo REAL do ticket (descarta fantasma: só conta documento==ticket ou casa com este orçamento)
+    tem_custo = _tem_custo_real(custos, tk, valor, nome)
     veredito=""
     # READ-ONLY: a conferência NÃO move nem marca nada — só detecta e reporta a duplicidade.
     if not tem_custo:
-        veredito="a_lancar"                                     # ticket sem custo -> pode lançar
+        veredito="a_lancar"                                     # sem custo REAL do ticket -> pode lançar
     elif lancado_bd:
         veredito="ja_lancado"                                   # sistema já lançou este
     elif _custo_casa(custos, valor, nome):
         veredito="lancado_manual"                               # lançado NA MÃO (valor/PDF batem)
     else:
-        veredito="conflito"                                     # custo é de OUTRO orçamento
-    print(f"  ticket {tk}: custos={len(custos)} lancado_bd={lancado_bd} -> {veredito} (read-only)", flush=True)
+        veredito="conflito"                                     # custo do ticket é de OUTRO orçamento
+    print(f"  ticket {tk}: custos_api={len(custos)} real={'sim' if tem_custo else 'nao'} lancado_bd={lancado_bd} -> {veredito} (read-only)", flush=True)
     _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
           "custos":custos,"veredito":veredito,
           "duplicata":(veredito in ("ja_lancado","lancado_manual","conflito")),
@@ -256,9 +303,14 @@ def lancar_um(page, it):
     if not tk: return fail("sem ticket associado")
     lancado_bd = bool(it.get("lancado"))
 
-    # PRÉ-CHECAGEM POR API: se o ticket já tem custo, decide pela marca 'lancado' do BD.
+    # NÃO lançar em ticket que não existe (número errado na origem)
+    if _ticket_existe(page, tk) is False:
+        print(f"[skip] ticket {tk}: NÃO EXISTE no Trílogo — número errado, não lanço", flush=True)
+        _prog(nome, "ticket inexistente no Trílogo — corrigir o número", 0)
+        return False
+    # PRÉ-CHECAGEM POR API: só conta custo REAL do ticket (ignora fantasma).
     ok_conta, custos_api = _custos_api(page, tk)
-    if ok_conta and custos_api:
+    if ok_conta and _tem_custo_real(custos_api, tk, valor, nome):
         if lancado_bd or _custo_casa(custos_api, valor, nome):
             print(f"[ja-lancado] ticket {tk}: custo é deste orçamento (sistema ou manual) — reconcilia, não relança", flush=True)
             _prog(nome, "já lançado", 100)
