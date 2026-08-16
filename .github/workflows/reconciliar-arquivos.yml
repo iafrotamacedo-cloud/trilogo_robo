@@ -1,0 +1,35 @@
+name: FrotaHub → reconciliar arquivo_pdf (10/11 → banco)
+# Abre PDF por PDF das pastas 10/11, pega o TOTAL GERAL e casa com notas_orcamento
+# por TICKET + VALOR (único). Preenche o arquivo_pdf onde está NULL.
+# Rode PRIMEIRO com aplicar=nao (só mostra o plano). Confira o log. Depois aplicar=sim.
+on:
+  workflow_dispatch:
+    inputs:
+      aplicar:
+        description: "gravar no banco? (nao = só mostra o plano)"
+        required: false
+        default: "nao"
+      so_nulos:
+        description: "só preencher onde está NULO? (nao = também corrige divergentes)"
+        required: false
+        default: "sim"
+jobs:
+  reconciliar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Instalar dependências
+        run: pip install pdfplumber
+      - name: Reconciliar
+        env:
+          DROPBOX_APP_KEY:       ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET:    ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY:  ${{ secrets.SUPABASE_SERVICE_KEY }}
+          APLICAR:  ${{ github.event.inputs.aplicar == 'sim' && '1' || '0' }}
+          SO_NULOS: ${{ github.event.inputs.so_nulos == 'nao' && '0' || '1' }}
+        run: python reconciliar_arquivos.py
