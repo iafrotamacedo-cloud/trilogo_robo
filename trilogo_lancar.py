@@ -35,7 +35,7 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = "form-fix-3 (clique manual via JS + anexo no input do custo + tipo=Mão de obra)"
+ROBOT_LANCAR_REV = "form-fix-4 (tipo Mão de obra: mantém o padrão; só abre o dropdown se preciso)"
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -413,14 +413,34 @@ def lancar_um(page, it):
             print(f"[aviso] ticket {tk}: não achei o campo de anexo do custo — sigo sem anexar", flush=True)
     except Exception as e:
         print(f"[aviso] ticket {tk}: não anexei o PDF ({str(e)[:80]}) — sigo preenchendo", flush=True)
-    # Tipo de custo = Mão de obra  (ant-select #costType). O '$' evita casar com a opção
-    # combinada "Mão de obra e Materiais".
+    # Tipo de custo = Mão de obra (ant-select #costType). O Trílogo JÁ ABRE com "Mão de obra"
+    # selecionado; nesse caso não tocamos no dropdown (clicar no #costType é interceptado pelo
+    # <span> do valor -> o clique falha). Só se vier outro valor é que abrimos e escolhemos.
+    # O '$' evita casar com a opção combinada "Mão de obra e Materiais".
+    ALVO_TIPO = r"^\s*m[aã]o de obra\s*$"
     try:
-        page.locator("#costType").click(timeout=5000); page.wait_for_timeout(400)
-        try: page.get_by_role("option", name=re.compile(r"^\s*m[aã]o de obra\s*$", re.I)).first.click(timeout=4000)
-        except Exception: page.locator(".ant-select-item-option", has_text=re.compile(r"^\s*m[aã]o de obra\s*$", re.I)).first.click(timeout=4000)
-    except Exception as e:
-        return fail(f"não setei 'Mão de obra' ({e})")
+        _cur = page.evaluate("""() => {
+          const inp=document.querySelector('#costType');
+          const box=inp && inp.closest('.ant-select');
+          const it=box && box.querySelector('.ant-select-selection-item');
+          return it ? ((it.getAttribute('title')||it.textContent||'').trim()) : '';
+        }""") or ""
+    except Exception:
+        _cur = ""
+    if re.match(ALVO_TIPO, _cur, re.I):
+        print(f"  ticket {tk}: tipo de custo já é '{_cur}' — mantém", flush=True)
+    else:
+        try:
+            # abre pelo CONTAINER (.ant-select-selector), não pelo input (que fica atrás do valor)
+            box = page.locator("#costType").locator("xpath=ancestor::div[contains(@class,'ant-select')][1]")
+            sel = box.locator(".ant-select-selector").first
+            try: sel.click(timeout=4000)
+            except Exception: sel.click(timeout=4000, force=True)
+            page.wait_for_timeout(500)
+            try: page.get_by_role("option", name=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
+            except Exception: page.locator(".ant-select-item-option", has_text=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
+        except Exception as e:
+            return fail(f"não setei 'Mão de obra' ({e})")
     # Valor = #serviceCost  (máscara de moeda -> digita os centavos)
     try:
         cents = str(int(round(float(valor) * 100)))
