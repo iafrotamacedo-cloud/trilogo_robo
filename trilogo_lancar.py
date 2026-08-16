@@ -35,6 +35,8 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
+ROBOT_LANCAR_REV = "form-fix-3 (clique manual via JS + anexo no input do custo + tipo=Mão de obra)"
+print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
 RKEY  = os.environ.get("ROBOT_KEY", "")
@@ -257,6 +259,18 @@ def _click_js(page, pattern, tries=24, gap=500):
         page.wait_for_timeout(gap)
     return False
 
+_JS_MARK_ANEXO = r"""
+() => {
+  const ins=[...document.querySelectorAll('input[type=file]')];
+  // preferir o input de anexo DO CUSTO manual (evita o leitor de nota fiscal por IA)
+  let alvo = ins.find(e => /relacionados a este custo|outros arquivos/i.test(((e.closest('div')||{}).textContent)||''));
+  if(!alvo && ins.length) alvo = ins[ins.length-1];   // fallback: o último
+  if(!alvo) return null;
+  if(!alvo.id) alvo.id = 'robo_anexo_custo';
+  return '#'+alvo.id;
+}
+"""
+
 _JS_CUSTOS_DOM = r"""
 () => {
   const brl = s => { const m=(s||'').match(/R\$\s*([\d.]+),(\d{2})/); return m? parseFloat(m[1].replace(/\./g,'')+'.'+m[2]) : null; };
@@ -371,45 +385,42 @@ def lancar_um(page, it):
     if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"): return fail("não apareceu 'Novo custo'")
     page.wait_for_timeout(1400)
     _prog(nome, "preenchendo", 45)
-    # O "Novo custo" agora abre LIDERANDO com a IA de leitura de nota fiscal; é preciso clicar
-    # "Preencher informações manualmente" pra revelar o form manual (input file, #costType, #serviceCost…).
-    manual_ok = False
-    for _t in range(12):
-        for _loc in (
-            lambda: page.get_by_role("button", name=re.compile(r"preencher.*manual", re.I)),
-            lambda: page.get_by_text(re.compile(r"preencher.*(informa|manual)", re.I)),
-        ):
-            try:
-                el = _loc()
-                if el.count() > 0:
-                    el.first.click(timeout=2500); manual_ok = True; break
-            except Exception:
-                pass
-        if manual_ok: break
-        page.wait_for_timeout(500)
+    # O "Novo custo" abre LIDERANDO com a IA de leitura de nota fiscal; é preciso clicar
+    # "Preencher informações manualmente" pra revelar o form manual (#costType, #serviceCost,
+    # #documentNumber). ISSO É UM LINK, não um <button> -> get_by_role("button") NÃO pega.
+    # Uso o clique por JS (mesmo método de "Custos do ticket"/"Novo custo"): enxerga o link,
+    # rola até ele e bubbla o clique. (Foi o que falhava e derrubava todos os lançamentos.)
+    manual_ok = _click_js(page, r"preencher.*manual", tries=16, gap=500)
     if not manual_ok:
         print(f"[aviso] ticket {tk}: não cliquei 'Preencher informações manualmente' — tentando seguir", flush=True)
-    # espera o FORM MANUAL carregar (campo de valor ou de arquivo). Se não abrir, é mudança de tela.
+    # confirma o FORM MANUAL pela ASSINATURA dele: #serviceCost VISÍVEL. (Os input[type=file]
+    # são ocultos e existem também no leitor de IA, então não servem de sinal de "abriu".)
     try:
-        page.wait_for_selector("#serviceCost, input[type=file]", timeout=15000)
+        page.wait_for_selector("#serviceCost", state="visible", timeout=15000)
     except Exception:
         return fail("form manual de 'Novo custo' não abriu (a tela do Trílogo mudou)")
     page.wait_for_timeout(600)
-    # anexa o orçamento no dropzone (nota fiscal) ANTES de preencher
+    # anexa o orçamento NO input de anexo DO CUSTO ("outros arquivos relacionados a este custo"),
+    # NUNCA no dropzone da nota fiscal (esse dispararia o leitor de IA). O input é oculto ->
+    # marco por JS e uso set_input_files (funciona em input file oculto). Anexo é best-effort.
     pdf = _baixa_pdf(origem, nome)
     try:
-        page.wait_for_selector("input[type=file]", timeout=10000)
-        page.locator("input[type=file]").first.set_input_files(pdf)
-        page.wait_for_timeout(3500)
+        sel = page.evaluate(_JS_MARK_ANEXO)
+        if sel:
+            page.set_input_files(sel, pdf)
+            page.wait_for_timeout(2500)
+        else:
+            print(f"[aviso] ticket {tk}: não achei o campo de anexo do custo — sigo sem anexar", flush=True)
     except Exception as e:
         print(f"[aviso] ticket {tk}: não anexei o PDF ({str(e)[:80]}) — sigo preenchendo", flush=True)
-    # Tipo de custo = Materiais  (ant-select #costType)
+    # Tipo de custo = Mão de obra  (ant-select #costType). O '$' evita casar com a opção
+    # combinada "Mão de obra e Materiais".
     try:
         page.locator("#costType").click(timeout=5000); page.wait_for_timeout(400)
-        try: page.get_by_role("option", name=re.compile(r"^\s*materiais\s*$", re.I)).first.click(timeout=4000)
-        except Exception: page.locator(".ant-select-item-option", has_text=re.compile(r"^\s*materiais\s*$", re.I)).first.click(timeout=4000)
+        try: page.get_by_role("option", name=re.compile(r"^\s*m[aã]o de obra\s*$", re.I)).first.click(timeout=4000)
+        except Exception: page.locator(".ant-select-item-option", has_text=re.compile(r"^\s*m[aã]o de obra\s*$", re.I)).first.click(timeout=4000)
     except Exception as e:
-        return fail(f"não setei 'Materiais' ({e})")
+        return fail(f"não setei 'Mão de obra' ({e})")
     # Valor = #serviceCost  (máscara de moeda -> digita os centavos)
     try:
         cents = str(int(round(float(valor) * 100)))
