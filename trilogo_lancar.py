@@ -35,7 +35,7 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = "form-fix-7 (log de diagnóstico pré-concluir + clique real do Concluir esperando habilitar)"
+ROBOT_LANCAR_REV = "form-fix-8 (tipo commitado com ENTER — clicar a opção não gravava, Concluir ficava desabilitado)"
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -166,14 +166,15 @@ def login(page):
     if ci.get("name") and ("mercadinho" not in str(ci.get("name")).lower()):
         print(f"  ⚠️ ATENÇÃO: a sessão do robô NÃO está no Mercadinhos São Luiz e sim em '{ci.get('name')}' "
               f"(companyGroup {ci.get('id')}). As consultas de custo/existência vão sair ERRADAS.", flush=True)
-    # AUTO-TESTE de diagnóstico: o que ESTA sessão enxerga p/ tickets-chave (comparar com a verdade)
-    for _tk in ("126713","126039","126400","126670","125973","126454"):
-        try:
-            _ex = _ticket_existe(page, _tk)
-            _ok, _cs = _custos_api(page, _tk)
-            print(f"  [selftest] ticket {_tk}: existe={_ex} custos={len(_cs)} docs={[c.get('doc') for c in _cs]}", flush=True)
-        except Exception as _e:
-            print(f"  [selftest] ticket {_tk}: erro {str(_e)[:60]}", flush=True)
+    # AUTO-TESTE de diagnóstico (só quando SELFTEST=1) — enxuga a corrida no dia a dia.
+    if os.environ.get("SELFTEST"):
+        for _tk in ("126713","126039","126400","126670","125973","126454"):
+            try:
+                _ex = _ticket_existe(page, _tk)
+                _ok, _cs = _custos_api(page, _tk)
+                print(f"  [selftest] ticket {_tk}: existe={_ex} custos={len(_cs)} docs={[c.get('doc') for c in _cs]}", flush=True)
+            except Exception as _e:
+                print(f"  [selftest] ticket {_tk}: erro {str(_e)[:60]}", flush=True)
 
 def _company(page):
     """Lê companyGroupId/Name/email do token da sessão (pra conferir QUEM/QUAL cliente o robô usa)."""
@@ -420,22 +421,32 @@ def lancar_um(page, it):
     # <span> do valor, então abrimos pelo CONTAINER (.ant-select-selector), não pelo input.
     ALVO_TIPO = r"^\s*m[aã]o de obra\s*$"
     try:
-        # abre o dropdown clicando no CONTAINER do ant-select do #costType. Uso CSS :has() em vez
-        # de xpath ancestor: o ancestor casava também com div.ant-select-SELECTOR (o nome contém
-        # 'ant-select'), e o seletor de dentro dele não existia -> dava timeout.
+        # abre o dropdown clicando no CONTAINER do ant-select do #costType. CSS :has() (o xpath
+        # ancestor casava também com div.ant-select-SELECTOR e dava timeout).
         sel = page.locator(".ant-select:has(#costType) .ant-select-selector").first
         try: sel.click(timeout=5000)
         except Exception: sel.click(timeout=5000, force=True)
         page.wait_for_timeout(600)
-        # escolhe "Mão de obra" ATIVAMENTE (opção). Se não achar, Enter pega a destacada (padrão).
-        try:
-            page.get_by_role("option", name=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
-        except Exception:
-            try:
-                page.locator(".ant-select-item-option", has_text=re.compile(ALVO_TIPO, re.I)).first.click(timeout=4000)
-            except Exception:
-                page.keyboard.press("Enter")
-        page.wait_for_timeout(300)
+        # COMMIT REAL: só CLICAR na opção NÃO grava o valor no formulário — o Trílogo continuava
+        # exibindo "Mão de obra" com o campo VAZIO por dentro, e o "Concluir" ficava DESABILITADO
+        # (era exatamente isso: log '[pré-concluir] ... concluir_disabled=True'). O que grava é
+        # ESCOLHER a opção destacada com ENTER (verificado ao vivo). "Mão de obra" é a 1ª opção e
+        # já vem destacada por padrão, então abrir + Enter seleciona ela.
+        page.keyboard.press("Enter")
+        page.wait_for_timeout(400)
+        # segurança: confere se ficou "Mão de obra"; se não, reabre e escolhe pela opção.
+        _tnow = page.evaluate(r"""() => {
+          const fis=[...document.querySelectorAll('.ant-form-item')];
+          const fi=fis.find(f=>{const l=f.querySelector('label'); return l && l.textContent && l.textContent.includes('Tipo de custo');});
+          return (fi&&fi.querySelector('.ant-select-selection-item')||{}).textContent||'';
+        }""") or ""
+        if not re.match(ALVO_TIPO, _tnow.strip(), re.I):
+            try: sel.click(timeout=3000)
+            except Exception: pass
+            page.wait_for_timeout(400)
+            try: page.get_by_role("option", name=re.compile(ALVO_TIPO, re.I)).first.click(timeout=3000)
+            except Exception: page.keyboard.press("Enter")
+            page.wait_for_timeout(300)
     except Exception as e:
         return fail(f"não setei 'Mão de obra' ({e})")
     # Valor = #serviceCost. A máscara NÃO preenche por centavos: digitar "6096" vira R$ 6.096
