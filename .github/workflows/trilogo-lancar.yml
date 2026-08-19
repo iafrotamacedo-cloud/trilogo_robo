@@ -10,14 +10,21 @@ on:
         description: "origem/arquivo específico (vazio = todos)"
         required: false
         default: ""
+# 2 cliques seguidos não rodam em paralelo (evita lançar o MESMO orçamento 2x) — o 2º fica na fila
+concurrency:
+  group: trilogo-lancar
+  cancel-in-progress: false
 jobs:
   lancar:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install playwright && python -m playwright install --with-deps chromium
+      # SEM 'playwright install' (era ~2-3 min por rodada): o robô usa o CHROME que já
+      # vem instalado no runner do GitHub (channel='chrome'). Só a lib python é instalada.
+      - run: pip install --quiet playwright
       - name: Instalações (jonas)
         env:
           MOTOR_URL: ${{ secrets.MOTOR_URL }}
