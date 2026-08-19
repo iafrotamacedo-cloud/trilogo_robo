@@ -44,7 +44,8 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = "adicional-1 (permite orçamento ADICIONAL no mesmo ticket: trava A = status Executado/Vistoriado; trava B = soma dos custos + novo <= R$600,00)"
+ROBOT_LANCAR_REV = ("adicional-3 (travas A/B + velocidade: Chrome do runner, esperas enxutas, "
+                    "cronômetro, MODO CAPTURA, e status PRÉ-CARREGADOS 1x por conta no lote)")
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -74,6 +75,19 @@ LOGIN_URL = BASE_URL + "/"
 API_URL   = "https://web.api.trilogo.app"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+# Espera após anexar o PDF (a IA do Trílogo processa e PODE sobrescrever campos se
+# preenchermos cedo demais). Ajustável sem mexer no código: ROBO_IA_ESPERA_MS.
+IA_ESPERA_MS = int(os.environ.get("ROBO_IA_ESPERA_MS", "7000"))
+
+def _abre_navegador(p):
+    """Abre o navegador SEM depender do download do Chromium do Playwright (~2-3 min por
+       rodada no Actions): usa o CHROME que já vem instalado no runner (channel='chrome').
+       Fallback: Chromium do Playwright (para rodar localmente onde ele já foi baixado)."""
+    try:
+        return p.chromium.launch(channel="chrome", headless=True)
+    except Exception as e:
+        print(f"  chrome do sistema indisponível ({str(e)[:80]}) — tentando o chromium do playwright", flush=True)
+        return p.chromium.launch(headless=True)
 
 def _get(path):
     req = urllib.request.Request(f"{MOTOR}{path}", headers={"x-robot-key": RKEY})
@@ -150,9 +164,48 @@ async (tk) => {
 }
 """
 
+_STATUS_MAP = {}   # {ticket: status} pré-carregado 1x por conta (lotes) — evita 1 chamada por item
+
+_JS_LISTA = r"""
+async (offset) => {
+  const s = JSON.parse(localStorage.getItem('session') || '{}');
+  const tkn = s.accessToken;
+  if (!tkn) return { status: 0 };
+  try {
+    const r = await fetch('https://web.api.trilogo.app/api/Ticket/ListTicketsByUser',
+      { method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+tkn},
+        body: JSON.stringify({ StatusActions:'1,2,3,4,5,6,7,8,9,10', OnlyUnread:false,
+                               Offset: offset, Limit: 200 }) });
+    let j = null; try { j = await r.json(); } catch(e) {}
+    const arr = (j && Array.isArray(j.tickets)) ? j.tickets : [];
+    return { status: r.status, tickets: arr.map(t => ({ id: t.id, st: t.status })) };
+  } catch (e) { return { status: -1 }; }
+}
+"""
+
+def _prefetch_status(page):
+    """LOTE: 1 varredura paginada da ListTicketsByUser -> {ticket: status}, feita UMA vez
+       por conta. Depois a Trava A (status) e a existência saem do mapa, sem API por item."""
+    off = 0; t0 = time.time()
+    while True:
+        try: r = page.evaluate(_JS_LISTA, off)
+        except Exception: break
+        if r.get("status") != 200: break
+        tks = r.get("tickets") or []
+        for t in tks:
+            if t.get("id") is not None: _STATUS_MAP[str(t["id"])] = t.get("st")
+        if len(tks) < 200: break
+        off += 200
+    print(f"  status pré-carregados 1x: {len(_STATUS_MAP)} tickets em {time.time()-t0:.0f}s", flush=True)
+
 def _ticket_info(page, tk):
     """(existe, status_code) do ticket. existe: True/False/None (não verificado);
-       status_code: int da API (5=Vistoriado, 7=Executado, …) ou None."""
+       status_code: int da API (5=Vistoriado, 7=Executado, …) ou None.
+       Usa o mapa pré-carregado quando houver; senão consulta pontual."""
+    st = _STATUS_MAP.get(str(tk))
+    if st is not None:
+        return (True, st)
     try:
         r = page.evaluate(_JS_EXISTE, str(tk))
     except Exception:
@@ -187,7 +240,7 @@ def login(page):
     page.locator("input[type=password]").first.fill(SENHA)
     try: page.get_by_role("button", name=re.compile("entrar|continuar|acessar|login", re.I)).click(timeout=5000)
     except Exception: page.keyboard.press("Enter")
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(1500)   # o token é conferido logo abaixo; não precisa de 3s fixos
     # confirma que temos token (necessário para as chamadas de API)
     tk = _token(page)
     ci = _company(page)
@@ -432,12 +485,12 @@ def lancar_um(page, it):
     _prog(nome, "abrindo ticket", 15)
     print(f"  ticket {tk}: abrindo…", flush=True)
     page.goto(f"{BASE_URL}/ticket/{tk}", wait_until="domcontentloaded")
-    page.wait_for_timeout(2500)
+    page.wait_for_timeout(1200)   # o _click_js abaixo já espera a seção aparecer (poll)
     if "ticket" not in page.url:
         print(f"[skip] ticket {tk} não abriu nesta conta"); return False   # não marca falha (outra conta)
     # "Custos do ticket" é um <span>, NÃO um botão -> clique por JS (bubbla e expande)
     if not _click_js(page, r"^\s*custos do ticket\s*$"): return fail("não achei a seção 'Custos do ticket'")
-    page.wait_for_timeout(1000)
+    page.wait_for_timeout(600)
     # 2ª CAMADA (pela TELA): revalida com o que está na seção "Custos do ticket" agora
     # (pega custo adicionado no meio-tempo e cobre o caso em que a API não respondeu).
     try: custos = page.evaluate(_JS_CUSTOS_DOM) or []
@@ -458,7 +511,7 @@ def lancar_um(page, it):
         print(f"  ticket {tk}: lançando orçamento ADICIONAL — o ticket vai ficar com {len(custos)+1} custo(s), "
               f"soma R$ {_fmt_valor(soma_tela+v_novo)}", flush=True)
     if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"): return fail("não apareceu 'Novo custo'")
-    page.wait_for_timeout(1400)
+    page.wait_for_timeout(800)
     _prog(nome, "preenchendo", 45)
     # O "Novo custo" abre LIDERANDO com a IA de leitura de nota fiscal; é preciso clicar
     # "Preencher informações manualmente" pra revelar o form manual (#costType, #serviceCost,
@@ -486,7 +539,7 @@ def lancar_um(page, it):
             return fail("não achei o dropzone da nota fiscal para anexar")
         page.set_input_files(sel, pdf)
         print(f"  ticket {tk}: nota fiscal anexada — aguardando o leitor de IA assentar…", flush=True)
-        page.wait_for_timeout(7000)   # dá tempo da IA processar o PDF
+        page.wait_for_timeout(IA_ESPERA_MS)   # dá tempo da IA processar o PDF (ROBO_IA_ESPERA_MS)
     except Exception as e:
         return fail(f"não anexei a nota fiscal ({str(e)[:80]})")
     # a IA pode ter trocado a tela; garante que o form manual está presente (reabre se sumiu)
@@ -616,15 +669,36 @@ def main():
     feitos = 0
     with sync_playwright() as p:
         print("PASSO B: abrindo navegador (Chromium)…", flush=True)
-        br = p.chromium.launch(headless=True)
+        br = _abre_navegador(p)
         ctx = br.new_context(user_agent=UA)
         ctx.set_default_navigation_timeout(30000)
         page = ctx.new_page(); page.set_default_timeout(12000)   # falha rápido em vez de travar
+        # MODO CAPTURA (CAPTURA=1): loga as chamadas de escrita à API do Trílogo durante o
+        # lançamento — serve para MAPEAR o endpoint de criação de custo e, na próxima revisão,
+        # lançar DIRETO pela API (segundos por item, sem abrir a tela). Só loga, não muda nada.
+        if os.environ.get("CAPTURA"):
+            def _cap(resp):
+                try:
+                    rq = resp.request
+                    if "web.api.trilogo.app" in rq.url and rq.method in ("POST", "PUT", "PATCH"):
+                        pd = ""
+                        try: pd = (rq.post_data or "")[:500]
+                        except Exception: pass
+                        print(f"  [captura] {rq.method} {rq.url} -> {resp.status} | ct={rq.headers.get('content-type','')[:60]} | payload[:500]={pd}", flush=True)
+                except Exception: pass
+            page.on("response", _cap)
+            print("  MODO CAPTURA ligado: vou logar os POSTs da API durante o lançamento", flush=True)
         try:
             login(page)
         except Exception as e:
             print("Falha no login:", e); br.close(); sys.exit(1)
+        # LOTE: com 3+ itens, vale pré-carregar os status de TODOS os tickets numa varredura
+        # só (poucas chamadas paginadas) em vez de 1 consulta por item. Com 1-2 itens, a
+        # consulta pontual continua mais barata.
+        if len(fila) >= 3:
+            _prefetch_status(page)
         for idx, it in enumerate(fila, 1):
+            t1 = time.time()
             print(f"[{idx}/{len(fila)}] ticket {it.get('ticket')} · {it.get('arquivo')}", flush=True)
             try:
                 if MODO == "conferir":
@@ -634,6 +708,7 @@ def main():
                     if r.get("ok"): feitos += 1; print(f"       movido: {it['arquivo']}")
             except Exception as e:
                 print(f"[erro] {it.get('arquivo')}: {str(e)[:160]}")
+            print(f"       ⏱ item em {time.time()-t1:.0f}s", flush=True)
         br.close()
     print(f"conta {ABA} [MODO={MODO}]: {feitos} processado(s). tempo total {time.time()-t0:.0f}s")
 
