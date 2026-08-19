@@ -8,15 +8,24 @@ Pega a lista no motor do FrotaHub, loga na conta e trabalha os orçamentos das p
 >>> NOVIDADE (rev API): a existência de custo é lida pela API do Trílogo
     GET https://web.api.trilogo.app/api/Ticket/GetTicketCosts?ticketId={numero}
     (token vem do localStorage['session'].accessToken após o login).
-    Resposta: []  -> nenhum custo (ainda não lançado)
-              [ {..} ] -> já tem custo (Trílogo NÃO deixa inserir um 2º) => JÁ LANÇADO.
+    Resposta: []  -> nenhum custo
+              [ {..} ] -> custos já lançados (valores usados na trava da SOMA).
     Cada custo traz: type, totalValue, documentNumber, invoiceFiles[].fileName.
 
-MODO=conferir : só LÊ os custos pela API (segundos) e REPORTA quais tickets já têm custo
-                (duplicidade). READ-ONLY: não move arquivo, não marca lançado, não lança.
-MODO=lancar   : para cada orçamento, PRÉ-CHECA por API; se já tem custo, só reconcilia
-                (sem abrir a tela); se não tem, abre "Custos do ticket > Novo custo",
-                sobe o PDF, Tipo=Materiais, Valor=TOTAL GERAL, Nº do documento=ticket, conclui.
+>>> ORÇAMENTO ADICIONAL (rev adicional-1): um ticket que JÁ TEM custo PODE receber outro.
+    "Já existe custo" só bloqueia quando o custo é DESTE orçamento (valor/PDF batem, ou o
+    BD marca lançado) => reconcilia. Para lançar (1º ou adicional) valem DUAS TRAVAS:
+      A) STATUS do ticket precisa ser Executado (7) ou Vistoriado (5) — senão pula com
+         "ticket <N> não está Executado/Vistoriado";
+      B) SOMA de todos os custos do ticket + o novo <= R$ 600,00 (TETO_SOMA) — senão pula
+         com a mensagem exata "soma acima de R$600,00".
+
+MODO=conferir : só LÊ os custos pela API (segundos) e REPORTA quais tickets já têm custo.
+                READ-ONLY: não move arquivo, não marca lançado, não lança.
+MODO=lancar   : para cada orçamento, PRÉ-CHECA por API (existência, status, custos, soma);
+                se já tem custo DESTE orçamento, só reconcilia (sem abrir a tela); senão
+                abre "Custos do ticket > Novo custo", sobe o PDF, Tipo=Materiais,
+                Valor=TOTAL GERAL, Nº do documento=ticket, conclui.
 
 Segredos (GitHub):
   MOTOR_URL   ex.: https://motor-orcamentos.onrender.com
@@ -35,7 +44,7 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = "form-fix-9 (anexa a NOTA FISCAL no dropzone certo — obrigatória p/ habilitar Concluir + fail-fast)"
+ROBOT_LANCAR_REV = "adicional-1 (permite orçamento ADICIONAL no mesmo ticket: trava A = status Executado/Vistoriado; trava B = soma dos custos + novo <= R$600,00)"
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -53,6 +62,13 @@ SENHA = os.environ["TRILOGO_SENHA"]
 ABA   = os.environ.get("ABA", "").upper()
 ALVO  = os.environ.get("ALVO", "").strip()   # "origem/arquivo" -> lança só esse; vazio = todos
 MODO  = (os.environ.get("MODO", "") or "lancar").strip()   # "conferir" = só lê custos, não lança
+
+# ---- REGRAS DO ORÇAMENTO ADICIONAL (mesmo ticket pode receber 2+ custos) ----
+# Trava A: só lança se o status do ticket for Executado (7) ou Vistoriado (5).
+# Trava B: soma de TODOS os custos já lançados no ticket + o novo <= TETO_SOMA.
+STATUS_OK_LANCAR = {5, 7}                                  # 5=Vistoriado · 7=Executado (códigos da API)
+STATUS_LABEL = {1: "Aberto", 6: "Em execução", 7: "Executado", 5: "Vistoriado", 3: "Arquivado"}
+TETO_SOMA = float(os.environ.get("TETO_SOMA", "600"))      # R$ — teto da SOMA acumulada por ticket
 BASE_URL  = "https://mercadinhossaoluiz.trilogo.app"
 LOGIN_URL = BASE_URL + "/"
 API_URL   = "https://web.api.trilogo.app"
@@ -128,21 +144,35 @@ async (tk) => {
         body: JSON.stringify({ searchTerm: String(tk), page:1, pageSize:20 }) });
     let j = null; try { j = await r.json(); } catch(e) {}
     const arr = (j && Array.isArray(j.tickets)) ? j.tickets : [];
-    const existe = arr.some(t => String(t.id) === String(tk));
-    return { status: r.status, existe: existe };
-  } catch (e) { return { status: -1, existe: null }; }
+    const t = arr.find(t => String(t.id) === String(tk));
+    return { status: r.status, existe: !!t, tstatus: (t && t.status != null) ? t.status : null };
+  } catch (e) { return { status: -1, existe: null, tstatus: null }; }
 }
 """
 
-def _ticket_existe(page, tk):
-    """True/False se o ticket existe no Trílogo; None se não deu pra verificar."""
+def _ticket_info(page, tk):
+    """(existe, status_code) do ticket. existe: True/False/None (não verificado);
+       status_code: int da API (5=Vistoriado, 7=Executado, …) ou None."""
     try:
         r = page.evaluate(_JS_EXISTE, str(tk))
     except Exception:
-        return None
+        return (None, None)
     if r.get("status") == 200:
-        return bool(r.get("existe"))
-    return None
+        return (bool(r.get("existe")), r.get("tstatus"))
+    return (None, None)
+
+def _ticket_existe(page, tk):
+    """True/False se o ticket existe no Trílogo; None se não deu pra verificar."""
+    return _ticket_info(page, tk)[0]
+
+def _soma_custos(custos):
+    """Soma os valores dos custos já lançados (lista normalizada de _custos_api
+       ou lista {tipo,valor} do DOM). Valores inválidos contam como 0."""
+    s = 0.0
+    for c in (custos or []):
+        try: s += float(c.get("valor") or 0)
+        except Exception: pass
+    return round(s, 2)
 
 def login(page):
     print("  login: abrindo tela…", flush=True)
@@ -349,22 +379,55 @@ def lancar_um(page, it):
     if not tk: return fail("sem ticket associado")
     lancado_bd = bool(it.get("lancado"))
 
-    # NÃO lançar em ticket que não existe (número errado na origem)
-    if _ticket_existe(page, tk) is False:
+    # VALOR do novo orçamento (precisa existir para a trava da soma e para o formulário)
+    try: v_novo = round(float(valor), 2)
+    except Exception: v_novo = None
+    if v_novo is None or v_novo <= 0:
+        print(f"[skip] ticket {tk}: valor do orçamento não lido — não lanço", flush=True)
+        _prog(nome, f"ticket {tk}: valor do orçamento não lido", 0)
+        return False
+
+    # EXISTÊNCIA + TRAVA A (STATUS, obrigatória): lê pela API (ListTicketsByUser).
+    # Orçamento (1º OU adicional) só entra em ticket Executado (7) ou Vistoriado (5).
+    existe, st_code = _ticket_info(page, tk)
+    if existe is False:
         print(f"[skip] ticket {tk}: NÃO EXISTE no Trílogo — número errado, não lanço", flush=True)
         _prog(nome, "ticket inexistente no Trílogo — corrigir o número", 0)
         return False
-    # PRÉ-CHECAGEM POR API: só conta custo REAL do ticket (ignora fantasma).
+    if existe and st_code is not None and st_code not in STATUS_OK_LANCAR:
+        rot = STATUS_LABEL.get(st_code, f"status {st_code}")
+        print(f"[skip] ticket {tk} não está Executado/Vistoriado (está: {rot}) — não lanço", flush=True)
+        _prog(nome, f"ticket {tk} não está Executado/Vistoriado", 0)
+        return False
+    if existe is None or st_code is None:
+        # a trava de status é PRÉ-CONDIÇÃO: sem status confirmado, não lança (rode de novo depois)
+        print(f"[skip] ticket {tk}: status não verificado pela API — não lanço (trava de status é obrigatória)", flush=True)
+        _prog(nome, f"ticket {tk}: status não verificado — tentar de novo", 0)
+        return False
+
+    # PRÉ-CHECAGEM POR API dos custos existentes.
     ok_conta, custos_api = _custos_api(page, tk)
-    if ok_conta and _tem_custo_real(custos_api, tk, valor, nome):
-        if lancado_bd or _custo_casa(custos_api, valor, nome):
-            print(f"[ja-lancado] ticket {tk}: custo é deste orçamento (sistema ou manual) — reconcilia, não relança", flush=True)
-            _prog(nome, "já lançado", 100)
-            return True                      # main move (1->2 / 4->5)
-        print(f"[conflito] ticket {tk}: já tem custo de OUTRO orçamento — NÃO lanço, deixo a nota onde está", flush=True)
-        _prog(nome, "conflito: ticket já tem custo de outro orçamento", 0)
-        return False                         # NÃO move (main só move se retornar True)
-    # (ok_conta False/None cai no fluxo normal: a própria tela confirma se é desta conta)
+    # "JÁ LANÇADO" continua valendo só para ESTE orçamento (valor/PDF batem, ou BD marca lançado):
+    if ok_conta and _tem_custo_real(custos_api, tk, valor, nome) and (lancado_bd or _custo_casa(custos_api, valor, nome)):
+        print(f"[ja-lancado] ticket {tk}: custo é deste orçamento (sistema ou manual) — reconcilia, não relança", flush=True)
+        _prog(nome, "já lançado", 100)
+        return True                      # main move (1->2 / 4->5)
+    # Custo de OUTRO orçamento NÃO é mais bloqueio: orçamento ADICIONAL é permitido,
+    # desde que respeite a TRAVA B (teto da soma) abaixo.
+
+    # TRAVA B (SOMA <= teto), 1ª camada, pela API: soma TODOS os custos já lançados + o novo.
+    if ok_conta:
+        soma_previa = _soma_custos(custos_api)
+        if soma_previa + v_novo > TETO_SOMA + 0.005:
+            print(f"[skip] ticket {tk}: custos existentes R$ {_fmt_valor(soma_previa)} + novo "
+                  f"R$ {_fmt_valor(v_novo)} = R$ {_fmt_valor(soma_previa+v_novo)} — passa do teto "
+                  f"de R$ {_fmt_valor(TETO_SOMA)}", flush=True)
+            _prog(nome, "soma acima de R$600,00", 0)
+            return False
+        if custos_api:
+            print(f"  ticket {tk}: {len(custos_api)} custo(s) já lançado(s) (R$ {_fmt_valor(soma_previa)}) — "
+                  f"orçamento ADICIONAL permitido (soma final R$ {_fmt_valor(soma_previa+v_novo)})", flush=True)
+    # (ok_conta False/None: a trava B roda de novo pela TELA, adiante)
 
     _prog(nome, "abrindo ticket", 15)
     print(f"  ticket {tk}: abrindo…", flush=True)
@@ -375,17 +438,25 @@ def lancar_um(page, it):
     # "Custos do ticket" é um <span>, NÃO um botão -> clique por JS (bubbla e expande)
     if not _click_js(page, r"^\s*custos do ticket\s*$"): return fail("não achei a seção 'Custos do ticket'")
     page.wait_for_timeout(1000)
-    # TRAVA ANTI-DUPLICAÇÃO (2ª camada, DOM): confirma que ninguém adicionou custo no meio-tempo.
+    # 2ª CAMADA (pela TELA): revalida com o que está na seção "Custos do ticket" agora
+    # (pega custo adicionado no meio-tempo e cobre o caso em que a API não respondeu).
     try: custos = page.evaluate(_JS_CUSTOS_DOM) or []
     except Exception: custos = []
-    if custos:
-        if lancado_bd or _custo_casa(custos, valor, nome):
-            print(f"[ja-lancado] ticket {tk}: custo (tela) é deste orçamento — reconcilia", flush=True)
-            _prog(nome, "já lançado", 100)
-            return True
-        print(f"[conflito] ticket {tk}: já tem custo (tela) de OUTRO orçamento — não lanço, deixo onde está", flush=True)
-        _prog(nome, "conflito: ticket já tem custo de outro orçamento", 0)
+    if custos and (lancado_bd or _custo_casa(custos, valor, nome)):
+        print(f"[ja-lancado] ticket {tk}: custo (tela) é deste orçamento — reconcilia", flush=True)
+        _prog(nome, "já lançado", 100)
+        return True
+    # TRAVA B (2ª camada): soma dos custos na tela + o novo <= teto
+    soma_tela = _soma_custos(custos)
+    if soma_tela + v_novo > TETO_SOMA + 0.005:
+        print(f"[skip] ticket {tk}: custos na tela R$ {_fmt_valor(soma_tela)} + novo "
+              f"R$ {_fmt_valor(v_novo)} = R$ {_fmt_valor(soma_tela+v_novo)} — passa do teto "
+              f"de R$ {_fmt_valor(TETO_SOMA)}", flush=True)
+        _prog(nome, "soma acima de R$600,00", 0)
         return False
+    if custos:
+        print(f"  ticket {tk}: lançando orçamento ADICIONAL — o ticket vai ficar com {len(custos)+1} custo(s), "
+              f"soma R$ {_fmt_valor(soma_tela+v_novo)}", flush=True)
     if not _click_js(page, r"^\s*\+?\s*novo custo\s*$"): return fail("não apareceu 'Novo custo'")
     page.wait_for_timeout(1400)
     _prog(nome, "preenchendo", 45)
