@@ -20,12 +20,14 @@ Pega a lista no motor do FrotaHub, loga na conta e trabalha os orçamentos das p
       B) SOMA de todos os custos do ticket + o novo <= R$ 600,00 (TETO_SOMA) — senão pula
          com a mensagem exata "soma acima de R$600,00".
 
-MODO=conferir : só LÊ os custos pela API (segundos) e REPORTA quais tickets já têm custo.
+MODO=conferir : reverifica o PONTO DE FALHA de cada orçamento (existência do ticket, status
+                atual — Aberto/Em execução/Arquivado — e valor) e REPORTA motivo + status_ticket.
                 READ-ONLY: não move arquivo, não marca lançado, não lança.
-MODO=lancar   : para cada orçamento, PRÉ-CHECA por API (existência, status, custos, soma);
-                se já tem custo DESTE orçamento, só reconcilia (sem abrir a tela); senão
-                abre "Custos do ticket > Novo custo", sobe o PDF, Tipo=Materiais,
-                Valor=TOTAL GERAL, Nº do documento=ticket, conclui.
+MODO=lancar   : para cada orçamento, PRÉ-CHECA por API (existência, status, soma) e SEMPRE
+                lança — a verificação de duplicidade foi REMOVIDA (não reconcilia/pula mais por
+                custo já existente). Abre "Custos do ticket > Novo custo", sobe o PDF,
+                Tipo=Materiais, Valor=TOTAL GERAL, Nº do documento=ticket, conclui.
+                Continuam valendo: Trava A (status Executado/Vistoriado) e Trava B (teto da soma).
 
 Segredos (GitHub):
   MOTOR_URL   ex.: https://motor-orcamentos.onrender.com
@@ -44,8 +46,8 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = ("adicional-4 (= adicional-3 com o prefetch de status BLINDADO: teto de páginas/tempo "
-                    "e parada em página repetida — não pendura o run se a API ignorar o Offset)")
+ROBOT_LANCAR_REV = ("adicional-6 (= adicional-5 + reporta MOTIVO e STATUS do ticket dos não "
+                    "lançados; MODO=conferir agora reverifica o ponto de falha, não a duplicidade)")
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -98,9 +100,15 @@ def _post(path, obj):
         headers={"x-robot-key": RKEY, "content-type": "application/json"})
     return json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
 
-def _prog(arquivo, status, pct):
-    """Reporta o andamento de um orçamento para o motor (barra da tela)."""
-    try: _post("/robot/lancar_progresso", {"arquivo": arquivo, "status": status, "pct": pct})
+def _prog(arquivo, status, pct, motivo=None, status_ticket=None):
+    """Reporta o andamento/RESULTADO de um orçamento para o motor (barra + lista de não lançados).
+       motivo: categoria fixa do resultado — FORA_STATUS, TICKET_INEXISTENTE, VALOR_NAO_LIDO,
+               NAO_VERIFICADO, SOMA_ACIMA, FALHA, SEM_TICKET, A_LANCAR, LANCADO.
+       status_ticket: rótulo do status do ticket no Trílogo (Aberto/Em execução/Arquivado…)."""
+    p={"arquivo": arquivo, "status": status, "pct": pct}
+    if motivo is not None: p["motivo"]=motivo
+    if status_ticket is not None: p["status_ticket"]=status_ticket
+    try: _post("/robot/lancar_progresso", p)
     except Exception: pass
 
 def _baixa_pdf(origem, nome):
@@ -377,67 +385,44 @@ _JS_CUSTOS_DOM = r"""
 }
 """
 
-# ---- CONFERÊNCIA (rápida, por API) -----------------------------------------------
+# ---- CONFERÊNCIA do PONTO DE FALHA (rápida, por API) — NÃO lança, NÃO move ----
 def conferir_um(page, it):
-    """Regra CERTA (usa a marca 'lancado' do BD como árbitro):
-       - ticket SEM custo no Trílogo            -> a lançar (não é duplicata), não move.
-       - ticket COM custo e orçamento lancado=1 -> foi ESTE que lançaram -> move (limpa 1->2/4->5).
-       - ticket COM custo e orçamento lancado=0 -> o custo é de OUTRO orçamento -> CONFLITO,
-                                                    NÃO move, deixa a nota onde está.
-       Nunca apaga."""
-    tk=it.get("ticket"); origem=it.get("origem"); nome=it.get("arquivo")
-    valor=it.get("valor"); lancado_bd=bool(it.get("lancado"))
+    """Reverifica POR QUE cada orçamento não sobe e REPORTA o motivo + o status atual do
+       ticket (Aberto/Em execução/Arquivado…). Não lança, não move, não mexe em custo.
+       Reporta via _prog (motivo/status_ticket) — o motor persiste na lista de não lançados."""
+    tk=it.get("ticket"); nome=it.get("arquivo"); valor=it.get("valor")
     if not tk:
-        _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-              "custos":[],"veredito":"sem_ticket","aberto":False}); return
-    ok_conta, custos = (None, [])
-    for _t in range(3):                       # retry: erro transitório NÃO pode virar "sem custo"
-        ok_conta, custos = _custos_api(page, tk)
-        if ok_conta is not None: break
-        time.sleep(0.6)
-    if ok_conta is None:    # NÃO deu pra verificar -> não afirma que está livre pra lançar
-        print(f"  ticket {tk}: NÃO VERIFICADO (erro na API)", flush=True)
-        _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-              "custos":[],"veredito":"nao_verificado","duplicata":False,"incerto":True,"aberto":True}); return
-    if ok_conta is False:   # ticket de outra conta — a outra conta confere
-        print(f"  ticket {tk}: fora desta conta (pula)")
-        _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-              "custos":[],"veredito":"outra_conta","aberto":False,"outra_conta":True}); return
-    # EXISTÊNCIA: a API de custos devolve custo FANTASMA p/ ticket inexistente -> valida antes
-    existe = _ticket_existe(page, tk)
+        _prog(nome, "sem ticket associado", 0, motivo="SEM_TICKET"); return
+    try: v=round(float(valor),2)
+    except Exception: v=None
+    if v is None or v<=0:
+        _prog(nome, "valor do orçamento não lido", 0, motivo="VALOR_NAO_LIDO"); return
+    existe, st_code = _ticket_info(page, tk)
     if existe is False:
-        print(f"  ticket {tk}: NÃO EXISTE no Trílogo — número errado (NÃO é duplicata)", flush=True)
-        _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-              "custos":[],"veredito":"ticket_inexistente","duplicata":False,"inexistente":True,"aberto":True}); return
-    # custo REAL do ticket (descarta fantasma: só conta documento==ticket ou casa com este orçamento)
-    tem_custo = _tem_custo_real(custos, tk, valor, nome)
-    veredito=""
-    # READ-ONLY: a conferência NÃO move nem marca nada — só detecta e reporta a duplicidade.
-    if not tem_custo:
-        veredito="a_lancar"                                     # sem custo REAL do ticket -> pode lançar
-    elif lancado_bd:
-        veredito="ja_lancado"                                   # sistema já lançou este
-    elif _custo_casa(custos, valor, nome):
-        veredito="lancado_manual"                               # lançado NA MÃO (valor/PDF batem)
-    else:
-        veredito="conflito"                                     # custo do ticket é de OUTRO orçamento
-    print(f"  ticket {tk}: custos_api={len(custos)} real={'sim' if tem_custo else 'nao'} lancado_bd={lancado_bd} -> {veredito} (read-only)", flush=True)
-    _post("/robot/conferir_resultado", {"arquivo":nome,"origem":origem,"ticket":tk,"valor":valor,
-          "custos":custos,"veredito":veredito,
-          "duplicata":(veredito in ("ja_lancado","lancado_manual","conflito")),
-          "reconciliado":False,"conflito":(veredito=="conflito"),"aberto":True})
-    time.sleep(0.06)   # gentileza com a API
+        print(f"  ticket {tk}: NÃO EXISTE no Trílogo", flush=True)
+        _prog(nome, "ticket inexistente no Trílogo", 0, motivo="TICKET_INEXISTENTE"); return
+    if existe is None or st_code is None:
+        print(f"  ticket {tk}: status NÃO verificado (erro na API)", flush=True)
+        _prog(nome, "status não verificado — tentar de novo", 0, motivo="NAO_VERIFICADO"); return
+    rot = STATUS_LABEL.get(st_code, f"status {st_code}")
+    if st_code not in STATUS_OK_LANCAR:
+        print(f"  ticket {tk}: fora de status (está: {rot})", flush=True)
+        _prog(nome, f"não lançado — {rot}", 0, motivo="FORA_STATUS", status_ticket=rot); return
+    # passou nas travas de status -> está pronto para lançar
+    print(f"  ticket {tk}: pronto pra lançar (status: {rot})", flush=True)
+    _prog(nome, f"pronto pra lançar ({rot})", 0, motivo="A_LANCAR", status_ticket=rot)
+    time.sleep(0.05)   # gentileza com a API
 
 # ---- LANÇAMENTO real (com pré-checagem por API) ----------------------------------
 def lancar_um(page, it):
     """Cria o custo no ticket. Devolve True só se confirmar o sucesso (ou se já estava lançado)."""
     tk = it.get("ticket"); origem = it.get("origem"); nome = it.get("arquivo")
     valor = it.get("valor")
-    def fail(msg, marca=True):
+    def fail(msg, marca=True, motivo="FALHA"):
         print(f"[falha] ticket {tk}: {msg}", flush=True)
-        if marca: _prog(nome, "falha", 0)
+        if marca: _prog(nome, "falha", 0, motivo=motivo)
         return False
-    if not tk: return fail("sem ticket associado")
+    if not tk: return fail("sem ticket associado", motivo="SEM_TICKET")
     lancado_bd = bool(it.get("lancado"))
 
     # VALOR do novo orçamento (precisa existir para a trava da soma e para o formulário)
@@ -445,7 +430,7 @@ def lancar_um(page, it):
     except Exception: v_novo = None
     if v_novo is None or v_novo <= 0:
         print(f"[skip] ticket {tk}: valor do orçamento não lido — não lanço", flush=True)
-        _prog(nome, f"ticket {tk}: valor do orçamento não lido", 0)
+        _prog(nome, "valor do orçamento não lido", 0, motivo="VALOR_NAO_LIDO")
         return False
 
     # EXISTÊNCIA + TRAVA A (STATUS, obrigatória): lê pela API (ListTicketsByUser).
@@ -453,28 +438,24 @@ def lancar_um(page, it):
     existe, st_code = _ticket_info(page, tk)
     if existe is False:
         print(f"[skip] ticket {tk}: NÃO EXISTE no Trílogo — número errado, não lanço", flush=True)
-        _prog(nome, "ticket inexistente no Trílogo — corrigir o número", 0)
+        _prog(nome, "ticket inexistente no Trílogo", 0, motivo="TICKET_INEXISTENTE")
         return False
     if existe and st_code is not None and st_code not in STATUS_OK_LANCAR:
         rot = STATUS_LABEL.get(st_code, f"status {st_code}")
         print(f"[skip] ticket {tk} não está Executado/Vistoriado (está: {rot}) — não lanço", flush=True)
-        _prog(nome, f"ticket {tk} não está Executado/Vistoriado", 0)
+        _prog(nome, f"não lançado — {rot}", 0, motivo="FORA_STATUS", status_ticket=rot)
         return False
     if existe is None or st_code is None:
         # a trava de status é PRÉ-CONDIÇÃO: sem status confirmado, não lança (rode de novo depois)
         print(f"[skip] ticket {tk}: status não verificado pela API — não lanço (trava de status é obrigatória)", flush=True)
-        _prog(nome, f"ticket {tk}: status não verificado — tentar de novo", 0)
+        _prog(nome, "status não verificado — tentar de novo", 0, motivo="NAO_VERIFICADO")
         return False
 
     # PRÉ-CHECAGEM POR API dos custos existentes.
     ok_conta, custos_api = _custos_api(page, tk)
-    # "JÁ LANÇADO" continua valendo só para ESTE orçamento (valor/PDF batem, ou BD marca lançado):
-    if ok_conta and _tem_custo_real(custos_api, tk, valor, nome) and (lancado_bd or _custo_casa(custos_api, valor, nome)):
-        print(f"[ja-lancado] ticket {tk}: custo é deste orçamento (sistema ou manual) — reconcilia, não relança", flush=True)
-        _prog(nome, "já lançado", 100)
-        return True                      # main move (1->2 / 4->5)
-    # Custo de OUTRO orçamento NÃO é mais bloqueio: orçamento ADICIONAL é permitido,
-    # desde que respeite a TRAVA B (teto da soma) abaixo.
+    # >>> VERIFICAÇÃO DE DUPLICIDADE REMOVIDA (a pedido): o robô NÃO reconcilia/pula mais quando
+    #     o custo já é deste orçamento — sempre segue para LANÇAR. Continuam valendo apenas a
+    #     Trava A (status Executado/Vistoriado, acima) e a Trava B (teto da soma, abaixo).
 
     # TRAVA B (SOMA <= teto), 1ª camada, pela API: soma TODOS os custos já lançados + o novo.
     if ok_conta:
@@ -483,7 +464,7 @@ def lancar_um(page, it):
             print(f"[skip] ticket {tk}: custos existentes R$ {_fmt_valor(soma_previa)} + novo "
                   f"R$ {_fmt_valor(v_novo)} = R$ {_fmt_valor(soma_previa+v_novo)} — passa do teto "
                   f"de R$ {_fmt_valor(TETO_SOMA)}", flush=True)
-            _prog(nome, "soma acima de R$600,00", 0)
+            _prog(nome, "soma acima de R$600,00", 0, motivo="SOMA_ACIMA")
             return False
         if custos_api:
             print(f"  ticket {tk}: {len(custos_api)} custo(s) já lançado(s) (R$ {_fmt_valor(soma_previa)}) — "
@@ -503,17 +484,14 @@ def lancar_um(page, it):
     # (pega custo adicionado no meio-tempo e cobre o caso em que a API não respondeu).
     try: custos = page.evaluate(_JS_CUSTOS_DOM) or []
     except Exception: custos = []
-    if custos and (lancado_bd or _custo_casa(custos, valor, nome)):
-        print(f"[ja-lancado] ticket {tk}: custo (tela) é deste orçamento — reconcilia", flush=True)
-        _prog(nome, "já lançado", 100)
-        return True
+    # (verificação de duplicidade pela TELA também removida — segue direto para a Trava B)
     # TRAVA B (2ª camada): soma dos custos na tela + o novo <= teto
     soma_tela = _soma_custos(custos)
     if soma_tela + v_novo > TETO_SOMA + 0.005:
         print(f"[skip] ticket {tk}: custos na tela R$ {_fmt_valor(soma_tela)} + novo "
               f"R$ {_fmt_valor(v_novo)} = R$ {_fmt_valor(soma_tela+v_novo)} — passa do teto "
               f"de R$ {_fmt_valor(TETO_SOMA)}", flush=True)
-        _prog(nome, "soma acima de R$600,00", 0)
+        _prog(nome, "soma acima de R$600,00", 0, motivo="SOMA_ACIMA")
         return False
     if custos:
         print(f"  ticket {tk}: lançando orçamento ADICIONAL — o ticket vai ficar com {len(custos)+1} custo(s), "
