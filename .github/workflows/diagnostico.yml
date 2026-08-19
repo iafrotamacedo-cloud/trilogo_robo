@@ -1,0 +1,24 @@
+name: Trílogo → DIAGNÓSTICO (só lê, não lança)
+on:
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install --quiet playwright
+      - name: Diagnóstico
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          MOTOR_URL: ${{ secrets.MOTOR_URL }}
+          ROBOT_KEY: ${{ secrets.ROBOT_KEY }}
+          TRILOGO_EMAIL: ${{ secrets.TRILOGO_EMAIL_INSTALACOES }}
+          TRILOGO_SENHA: ${{ secrets.TRILOGO_SENHA_INSTALACOES }}
+        run: python trilogo_diag.py
