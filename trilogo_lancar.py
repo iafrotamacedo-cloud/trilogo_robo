@@ -44,8 +44,8 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = ("adicional-3 (travas A/B + velocidade: Chrome do runner, esperas enxutas, "
-                    "cronômetro, MODO CAPTURA, e status PRÉ-CARREGADOS 1x por conta no lote)")
+ROBOT_LANCAR_REV = ("adicional-4 (= adicional-3 com o prefetch de status BLINDADO: teto de páginas/tempo "
+                    "e parada em página repetida — não pendura o run se a API ignorar o Offset)")
 print(f"ROBO lançar rev: {ROBOT_LANCAR_REV}")
 
 MOTOR = os.environ.get("MOTOR_URL", "").rstrip("/")
@@ -186,18 +186,26 @@ async (offset) => {
 
 def _prefetch_status(page):
     """LOTE: 1 varredura paginada da ListTicketsByUser -> {ticket: status}, feita UMA vez
-       por conta. Depois a Trava A (status) e a existência saem do mapa, sem API por item."""
-    off = 0; t0 = time.time()
-    while True:
+       por conta. Depois a Trava A (status) e a existência saem do mapa, sem API por item.
+       BLINDADA contra loop: para se a página não trouxer ticket NOVO, e tem teto de
+       páginas e de tempo — se a API ignorar o Offset, a varredura aborta e o robô segue
+       com as consultas pontuais (mais lento, mas nunca trava)."""
+    off = 0; t0 = time.time(); paginas = 0
+    while paginas < 60 and (time.time() - t0) < 90:          # tetos de segurança
         try: r = page.evaluate(_JS_LISTA, off)
         except Exception: break
         if r.get("status") != 200: break
         tks = r.get("tickets") or []
+        antes = len(_STATUS_MAP)
         for t in tks:
             if t.get("id") is not None: _STATUS_MAP[str(t["id"])] = t.get("st")
-        if len(tks) < 200: break
+        paginas += 1
+        if len(tks) < 200: break                              # última página
+        if len(_STATUS_MAP) == antes:                         # página repetida (API ignorou o Offset)
+            print("  [prefetch] API repetiu a página — abortando a varredura (sigo com consulta pontual)", flush=True)
+            break
         off += 200
-    print(f"  status pré-carregados 1x: {len(_STATUS_MAP)} tickets em {time.time()-t0:.0f}s", flush=True)
+    print(f"  status pré-carregados 1x: {len(_STATUS_MAP)} tickets em {time.time()-t0:.0f}s ({paginas} página(s))", flush=True)
 
 def _ticket_info(page, tk):
     """(existe, status_code) do ticket. existe: True/False/None (não verificado);
