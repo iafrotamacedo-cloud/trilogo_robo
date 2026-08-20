@@ -18,7 +18,10 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
 # ============ CONTADOR DE REVISÃO DO ROBÔ ============
-ROBO_REV = 7   # + marco "atendido" (dateOfLastInspection) gravado por chamado
+ROBO_REV = 8   # + marcos de TRANSIÇÃO persistidos (em_execucao_em / executado_em):
+               #   a recarga apaga e regrava, então antes de zerar lemos os carimbos antigos
+               #   e carregamos adiante; chamado que aparece pela 1ª vez em execução/concluído
+               #   ganha carimbo (backfill inicial: data da vistoria quando houver, senão hoje).
 # ====================================================
 
 EMAIL  = os.environ["TRILOGO_EMAIL"]
@@ -177,6 +180,34 @@ def upsert(rows):
     except urllib.error.HTTPError as e:
         print("Supabase erro:", e.code, e.read().decode()[:400]); sys.exit(1)
 
+def carrega_marcos():
+    """Lê os carimbos de transição já gravados (numero -> em_execucao_em/executado_em) desta ABA,
+       para carregá-los adiante na recarga (que apaga e regrava tudo)."""
+    url=f"{SB_URL}/rest/v1/chamados?aba=eq.{ABA}&select=numero,em_execucao_em,executado_em&limit=20000"
+    rq=urllib.request.Request(url, headers={"apikey":SB_KEY,"authorization":f"Bearer {SB_KEY}"})
+    try:
+        rows=json.loads(urllib.request.urlopen(rq).read().decode()) or []
+        return {str(r.get("numero")):(r.get("em_execucao_em"), r.get("executado_em")) for r in rows}
+    except Exception as e:
+        print("marcos: não li os carimbos antigos (colunas em_execucao_em/executado_em existem?):", str(e)[:160])
+        return {}
+
+_ATIVOS=("Em execução","Executado","Vistoriado","Arquivado")
+_CONCLUIDOS=("Executado","Vistoriado","Arquivado")
+def aplica_marcos(rows, marcos):
+    """MARCO DE ATENDIMENTO = entrada em execução. Preserva carimbo antigo; na 1ª vez
+       usa a data da vistoria (se houver) como aproximação, senão a data de hoje."""
+    hoje=datetime.now().strftime("%Y-%m-%d")
+    for r in rows:
+        em_prev, ex_prev = marcos.get(str(r.get("numero")), (None, None))
+        em=em_prev; ex=ex_prev
+        if not em and (r.get("status") in _ATIVOS):
+            em = r.get("atendido_em") or hoje
+        if not ex and (r.get("status") in _CONCLUIDOS):
+            ex = r.get("atendido_em") or hoje
+        r["em_execucao_em"]=em; r["executado_em"]=ex
+    return rows
+
 def zera_aba():
     """Apaga os chamados SÓ desta ABA (recarga completa da janela). As outras contas não são tocadas."""
     url = f"{SB_URL}/rest/v1/chamados?aba=eq.{ABA}"
@@ -238,6 +269,9 @@ def main():
     if not rows:
         print("AVISO: 0 chamados no resultado — NÃO vou zerar o banco (evita apagar tudo por falha de leitura).")
         return
+    marcos=carrega_marcos()          # carimbos antigos (sobrevivem à recarga)
+    rows=aplica_marcos(rows, marcos) # marco de atendimento = entrada em execução
+    print(f"marcos: {sum(1 for r in rows if r.get('em_execucao_em'))} com em_execucao_em · {sum(1 for r in rows if r.get('executado_em'))} com executado_em")
     zera_aba()      # limpa só esta aba
     upsert(rows)    # recarrega do zero
 
