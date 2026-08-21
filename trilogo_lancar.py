@@ -44,7 +44,9 @@ print("BOOT 2/3: imports básicos ok — importando playwright (pode levar algun
 from playwright.sync_api import sync_playwright
 print("BOOT 3/3: playwright importado — robô pronto para iniciar", flush=True)
 print = functools.partial(print, flush=True)
-ROBOT_LANCAR_REV = ("adicional-5 (CORREÇÃO: códigos de status 5/6/7 estavam trocados — agora 5=Executado, "
+ROBOT_LANCAR_REV = ("adicional-6 (EXTRAPOLADOS: estouro do teto agora é REPORTADO ao motor — vira pendência "
+                    "na área de Extrapolados do FrotaHub; orçamento APROVADO pelo cliente pula a trava B) "
+                    "(adicional-5: CORREÇÃO: códigos de status 5/6/7 estavam trocados — agora 5=Executado, "
                     "6=Vistoriado, 7=Em execução; trava A passa a aceitar {5,6}) "
                     "(= adicional-3 com o prefetch de status BLINDADO: teto de páginas/tempo "
                     "e parada em página repetida — não pendura o run se a API ignorar o Offset)")
@@ -431,6 +433,15 @@ def conferir_um(page, it):
     time.sleep(0.06)   # gentileza com a API
 
 # ---- LANÇAMENTO real (com pré-checagem por API) ----------------------------------
+def _reporta_extrapolado(nome, tk, soma, novo):
+    """Estouro do teto: avisa o motor (vira pendência na área de Extrapolados) — nada é apagado."""
+    try:
+        r=_post("/robot/lancar_extrapolado", {"arquivo":nome, "ticket":tk,
+                "soma_existente":round(soma,2), "valor_novo":round(novo,2)})
+        print(f"  extrapolado reportado ao motor: {r}", flush=True)
+    except Exception as e:
+        print(f"  [aviso] não reportei o extrapolado ao motor: {str(e)[:120]}", flush=True)
+
 def lancar_um(page, it):
     """Cria o custo no ticket. Devolve True só se confirmar o sucesso (ou se já estava lançado)."""
     tk = it.get("ticket"); origem = it.get("origem"); nome = it.get("arquivo")
@@ -441,6 +452,7 @@ def lancar_um(page, it):
         return False
     if not tk: return fail("sem ticket associado")
     lancado_bd = bool(it.get("lancado"))
+    aprovado   = bool(it.get("aprovado"))   # extrapolado APROVADO pelo cliente: trava B liberada
 
     # VALOR do novo orçamento (precisa existir para a trava da soma e para o formulário)
     try: v_novo = round(float(valor), 2)
@@ -481,12 +493,16 @@ def lancar_um(page, it):
     # TRAVA B (SOMA <= teto), 1ª camada, pela API: soma TODOS os custos já lançados + o novo.
     if ok_conta:
         soma_previa = _soma_custos(custos_api)
-        if soma_previa + v_novo > TETO_SOMA + 0.005:
+        if (not aprovado) and soma_previa + v_novo > TETO_SOMA + 0.005:
             print(f"[skip] ticket {tk}: custos existentes R$ {_fmt_valor(soma_previa)} + novo "
                   f"R$ {_fmt_valor(v_novo)} = R$ {_fmt_valor(soma_previa+v_novo)} — passa do teto "
                   f"de R$ {_fmt_valor(TETO_SOMA)}", flush=True)
             _prog(nome, "soma acima de R$600,00", 0)
+            _reporta_extrapolado(nome, tk, soma_previa, v_novo)
             return False
+        if aprovado and soma_previa + v_novo > TETO_SOMA + 0.005:
+            print(f"  ticket {tk}: soma R$ {_fmt_valor(soma_previa+v_novo)} ACIMA do teto, "
+                  f"mas orçamento APROVADO pelo cliente — lançando", flush=True)
         if custos_api:
             print(f"  ticket {tk}: {len(custos_api)} custo(s) já lançado(s) (R$ {_fmt_valor(soma_previa)}) — "
                   f"orçamento ADICIONAL permitido (soma final R$ {_fmt_valor(soma_previa+v_novo)})", flush=True)
@@ -511,11 +527,12 @@ def lancar_um(page, it):
         return True
     # TRAVA B (2ª camada): soma dos custos na tela + o novo <= teto
     soma_tela = _soma_custos(custos)
-    if soma_tela + v_novo > TETO_SOMA + 0.005:
+    if (not aprovado) and soma_tela + v_novo > TETO_SOMA + 0.005:
         print(f"[skip] ticket {tk}: custos na tela R$ {_fmt_valor(soma_tela)} + novo "
               f"R$ {_fmt_valor(v_novo)} = R$ {_fmt_valor(soma_tela+v_novo)} — passa do teto "
               f"de R$ {_fmt_valor(TETO_SOMA)}", flush=True)
         _prog(nome, "soma acima de R$600,00", 0)
+        _reporta_extrapolado(nome, tk, soma_tela, v_novo)
         return False
     if custos:
         print(f"  ticket {tk}: lançando orçamento ADICIONAL — o ticket vai ficar com {len(custos)+1} custo(s), "
