@@ -18,10 +18,10 @@ from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
 # ============ CONTADOR DE REVISÃO DO ROBÔ ============
-ROBO_REV = 8   # + marcos de TRANSIÇÃO persistidos (em_execucao_em / executado_em):
-               #   a recarga apaga e regrava, então antes de zerar lemos os carimbos antigos
-               #   e carregamos adiante; chamado que aparece pela 1ª vez em execução/concluído
-               #   ganha carimbo (backfill inicial: data da vistoria quando houver, senão hoje).
+ROBO_REV = 9   # CORREÇÃO GRAVE: o mapa de códigos de status estava com 5/6/7 trocados.
+               #   Conferido tela a tela no Trílogo (19-20/08/26):
+               #   5 = EXECUTADO · 6 = VISTORIADO · 7 = EM EXECUÇÃO.
+               #   (rev 8: marcos de transição em_execucao_em/executado_em preservados na recarga.)
 # ====================================================
 
 EMAIL  = os.environ["TRILOGO_EMAIL"]
@@ -40,7 +40,7 @@ STATUS = os.environ.get("STATUS_ACTIONS", "1,2,3,4,5,6,7,8,9,10")
 LIMIT = 50
 
 # rótulos conhecidos; códigos novos (ex.: Fechado/Arquivado) aparecem no DIAG e a gente mapeia aqui depois
-STATUS_LABEL = {1: "Aberto", 6: "Em execução", 7: "Executado", 5: "Vistoriado", 3: "Arquivado"}
+STATUS_LABEL = {1: "Aberto", 3: "Arquivado", 5: "Executado", 6: "Vistoriado", 7: "Em execução"}  # conferido na tela
 PRIOR_LABEL  = {1: "Baixa", 2: "Média", 3: "Alta", 4: "Urgente"}
 
 def aba_from(sc_name):
